@@ -24,7 +24,8 @@
   h1 { font-size: 20px; margin: 4px 0 14px; }
   h1 span { color: var(--accent); }
   form { display: flex; gap: 8px; }
-  input[type=text] {
+  input[type=text], input[type=search] {
+    -webkit-appearance: none; appearance: none; outline-color: var(--accent);
     flex: 1; min-width: 0; padding: 12px; border-radius: 10px;
     border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 16px;
   }
@@ -62,6 +63,21 @@
   li .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   li .x { padding: 4px 10px; font-size: 14px; }
   .empty { color: var(--muted); font-size: 14px; padding: 8px; }
+  #results { margin-top: 10px; }
+  #results[hidden] { display: none; }
+  .res-head { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+  .res-head button { font-size: 13px; padding: 4px 10px; }
+  #resList { max-height: 60vh; overflow-y: auto; }
+  #resList li { align-items: flex-start; }
+  #resList .th { position: relative; flex: none; }
+  #resList .th img { width: 120px; height: 68px; }
+  #resList .dur { position: absolute; right: 4px; bottom: 4px; background: rgba(0,0,0,.8); color: #fff; font-size: 11px; padding: 0 4px; border-radius: 4px; }
+  #resList .meta { flex: 1; min-width: 0; }
+  #resList .rt { font-size: 14px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  #resList .ra { font-size: 12px; color: var(--muted); }
+  #resList .add { flex: none; padding: 6px 12px; font-size: 16px; }
+  .more { width: 100%; margin-top: 6px; }
+  .settings input { width: 100%; margin-top: 6px; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 14px; }
   details { margin-top: 22px; color: var(--muted); font-size: 14px; }
   details summary { cursor: pointer; color: var(--text); }
 </style>
@@ -71,9 +87,15 @@
   <h1>▶ YT <span>Nền</span></h1>
 
   <form id="addForm">
-    <input id="url" type="text" placeholder="Dán link YouTube (video hoặc playlist)…" autocomplete="off">
-    <button class="primary" type="submit">Phát</button>
+    <input id="url" type="search" enterkeyhint="search" placeholder="Tìm bài hát hoặc dán link YouTube…" autocomplete="off">
+    <button class="primary" type="submit" id="go">Đi</button>
   </form>
+
+  <section id="results" hidden>
+    <div class="res-head"><span id="resInfo"></span><button id="resClose" type="button">Đóng</button></div>
+    <ul id="resList"></ul>
+    <button class="more" id="resMore" type="button" hidden>Xem thêm</button>
+  </section>
 
   <div class="player-wrap" id="wrap"><div id="player"></div></div>
 
@@ -97,6 +119,14 @@
 
   <h2>Danh sách phát <button id="clear" style="font-size:13px;padding:4px 10px">Xoá hết</button></h2>
   <ul id="queue"></ul>
+
+  <details class="settings">
+    <summary>Cài đặt tìm kiếm</summary>
+    <p>Mặc định trang tìm qua các máy chủ công khai miễn phí (Piped/Invidious). Đôi khi chúng chậm hoặc lỗi.
+      Muốn ổn định hơn, hãy dán <b>YouTube Data API key</b> của bạn (tạo miễn phí tại console.cloud.google.com → bật “YouTube Data API v3” → Credentials → API key).
+      Key chỉ lưu trên máy này.</p>
+    <input id="apiKey" type="text" placeholder="YouTube API key (không bắt buộc)" autocomplete="off" spellcheck="false">
+  </details>
 
   <details>
     <summary>Mẹo nghe khi tắt màn hình</summary>
@@ -275,13 +305,159 @@
 
   $('addForm').onsubmit = (e) => {
     e.preventDefault();
-    const p = parse($('url').value);
-    if (!p) { setStatus('Link không hợp lệ.'); return; }
+    const text = $('url').value.trim();
+    if (!text) return;
     unlockAudio();
+    const p = parse(text);
+    if (!p) { $('url').blur(); search(text); return; }
     $('url').value = '';
     if (p.list && ready) addPlaylist(p.list, p.video);
     else addVideos([p.video]);
   };
+
+  // ---------- Search ----------
+  // Kết quả chuẩn hoá: {id, title, author, dur (giây hoặc null)}
+  const PIPED = ['https://pipedapi.kavin.rocks', 'https://api.piped.private.coffee', 'https://pipedapi.adminforge.de', 'https://pipedapi.r4fo.com'];
+  const INVID = ['https://inv.nadeko.net', 'https://invidious.nerdvpn.de', 'https://iv.ggtyler.dev', 'https://invidious.privacyredirect.com'];
+  let sState = null; // {q, next, backend, page}
+
+  async function getJSON(url, ms = 7000) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), ms);
+    try {
+      const r = await fetch(url, { signal: ctl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } finally { clearTimeout(t); }
+  }
+  const parseISODur = (s) => {
+    const m = /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/.exec(s || '');
+    return m ? (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0) : null;
+  };
+  const fmtDur = (s) => {
+    if (s == null || s < 0) return '';
+    if (s === 0) return 'LIVE';
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = String(s % 60).padStart(2, '0');
+    return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+  };
+  const decode = (s) => { const d = document.createElement('textarea'); d.innerHTML = s || ''; return d.value; };
+
+  const backends = {
+    async youtube(q, next) {
+      const key = $('apiKey').value.trim();
+      const u = new URL('https://www.googleapis.com/youtube/v3/search');
+      Object.entries({ part: 'snippet', type: 'video', maxResults: 20, q, key, ...(next ? { pageToken: next } : {}) })
+        .forEach(([k, v]) => u.searchParams.set(k, v));
+      const d = await getJSON(u);
+      const items = d.items.map((it) => ({ id: it.id.videoId, title: decode(it.snippet.title), author: decode(it.snippet.channelTitle), dur: null }));
+      try { // lấy thời lượng
+        const v = await getJSON(`https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=${items.map((i) => i.id).join(',')}&key=${encodeURIComponent(key)}`);
+        const map = Object.fromEntries(v.items.map((x) => [x.id, parseISODur(x.contentDetails.duration)]));
+        items.forEach((i) => { i.dur = map[i.id] ?? null; });
+      } catch {}
+      return { items, next: d.nextPageToken || null };
+    },
+    async piped(q, next, base) {
+      const d = next
+        ? await getJSON(`${base}/nextpage/search?q=${encodeURIComponent(q)}&filter=videos&nextpage=${encodeURIComponent(next)}`)
+        : await getJSON(`${base}/search?q=${encodeURIComponent(q)}&filter=videos`);
+      const items = (d.items || []).filter((i) => i.url && i.url.includes('v=')).map((i) => ({
+        id: new URL(i.url, 'https://x').searchParams.get('v'), title: i.title, author: i.uploaderName, dur: i.duration ?? null,
+      }));
+      if (!items.length && !next) throw new Error('empty');
+      return { items, next: d.nextpage || null };
+    },
+    async invidious(q, page, base) {
+      page = page || 1;
+      const d = await getJSON(`${base}/api/v1/search?q=${encodeURIComponent(q)}&type=video&page=${page}`);
+      const items = d.filter((i) => i.type === 'video').map((i) => ({ id: i.videoId, title: i.title, author: i.author, dur: i.lengthSeconds ?? null }));
+      if (!items.length && page === 1) throw new Error('empty');
+      return { items, next: items.length ? page + 1 : null };
+    },
+  };
+
+  // Thứ tự thử: API key (nếu có) → máy chủ hoạt động lần trước → các máy chủ còn lại
+  function candidates() {
+    const list = [];
+    if ($('apiKey').value.trim()) list.push({ kind: 'youtube' });
+    PIPED.forEach((b) => list.push({ kind: 'piped', base: b }));
+    INVID.forEach((b) => list.push({ kind: 'invidious', base: b }));
+    const last = store.get('lastBackend', null);
+    if (last) {
+      const i = list.findIndex((c) => c.kind === last.kind && c.base === last.base);
+      if (i > 0 && list[0].kind !== 'youtube') list.unshift(...list.splice(i, 1));
+    }
+    return list;
+  }
+
+  async function search(q, more) {
+    const info = $('resInfo'), ul = $('resList');
+    $('results').hidden = false;
+    $('resMore').hidden = true;
+    if (!more) { ul.innerHTML = ''; sState = { q }; }
+    info.textContent = `Đang tìm “${q}”…`;
+    $('go').disabled = true;
+    const tries = more ? [sState.backend] : candidates();
+    let res = null, lastErr;
+    for (const c of tries) {
+      try {
+        res = await backends[c.kind](q, more ? sState.next : null, c.base);
+        sState.backend = c;
+        store.set('lastBackend', c);
+        break;
+      } catch (err) { lastErr = err; }
+    }
+    $('go').disabled = false;
+    if (!res) {
+      info.textContent = $('apiKey').value.trim()
+        ? 'Không tìm được (kiểm tra lại API key hoặc thử lại sau).'
+        : 'Các máy chủ tìm kiếm miễn phí đang bận. Thử lại sau, hoặc thêm API key trong “Cài đặt tìm kiếm”.';
+      console.warn(lastErr);
+      return;
+    }
+    sState.next = res.next;
+    res.items.forEach((it) => ul.appendChild(resultRow(it)));
+    info.textContent = `Kết quả cho “${q}”`;
+    $('resMore').hidden = !res.next;
+  }
+
+  function resultRow(it) {
+    const li = document.createElement('li');
+    li.innerHTML = `<div class="th"><img loading="lazy" alt=""><span class="dur"></span></div>
+      <div class="meta"><div class="rt"></div><div class="ra"></div></div>
+      <button class="add" title="Thêm vào danh sách">＋</button>`;
+    li.querySelector('img').src = thumb(it.id);
+    const d = fmtDur(it.dur);
+    const dur = li.querySelector('.dur');
+    if (d) dur.textContent = d; else dur.remove();
+    li.querySelector('.rt').textContent = it.title || it.id;
+    li.querySelector('.ra').textContent = it.author || '';
+    li.onclick = (e) => {
+      unlockAudio();
+      const add = e.target.closest('.add');
+      addItem(it, !add);
+      if (!add) $('wrap').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (add) { add.textContent = '✓'; add.disabled = true; setStatus('Đã thêm vào danh sách.'); }
+    };
+    return li;
+  }
+
+  // Thêm 1 video (từ kết quả tìm) — playNow: phát ngay, ngược lại xếp hàng
+  function addItem(it, playNow) {
+    let i = queue.findIndex((q) => q.id === it.id);
+    if (i < 0) {
+      const entry = { id: it.id, title: it.title, author: it.author };
+      if (playNow && queue.length) { i = idx + 1; queue.splice(i, 0, entry); }
+      else { queue.push(entry); i = queue.length - 1; }
+    }
+    if (playNow) playIndex(i, true);
+    else { if (queue.length === 1) playIndex(0, false); save(); render(); }
+  }
+
+  $('resClose').onclick = () => { $('results').hidden = true; };
+  $('resMore').onclick = () => sState && search(sState.q, true);
+  $('apiKey').value = store.get('apiKey', '');
+  $('apiKey').onchange = () => store.set('apiKey', $('apiKey').value.trim());
   $('play').onclick = toggle;
   $('next').onclick = () => next();
   $('prev').onclick = prev;
