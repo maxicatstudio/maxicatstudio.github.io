@@ -77,6 +77,9 @@
   #resList .ra { font-size: 12px; color: var(--muted); }
   #resList .add { flex: none; padding: 6px 12px; font-size: 16px; }
   .more { width: 100%; margin-top: 6px; }
+  .seek { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .seek input { flex: 1; min-width: 0; accent-color: var(--accent); }
+  select { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 14px; }
   .settings input { width: 100%; margin-top: 6px; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 14px; }
   details { margin-top: 22px; color: var(--muted); font-size: 14px; }
   details summary { cursor: pointer; color: var(--text); }
@@ -104,6 +107,12 @@
     <div><div class="t" id="nowTitle"></div><div class="s" id="nowSub"></div></div>
   </div>
 
+  <div class="seek">
+    <span id="tCur">0:00</span>
+    <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Tua">
+    <span id="tDur">0:00</span>
+  </div>
+
   <div class="controls">
     <button id="prev" title="Bài trước">⏮</button>
     <button id="play" title="Phát / Dừng">▶</button>
@@ -111,9 +120,16 @@
   </div>
 
   <div class="opts">
-    <label><input type="checkbox" id="audioOnly"> Chỉ âm thanh (ẩn video)</label>
+    <label>Chế độ
+      <select id="mode">
+        <option value="audio">🎧 Âm thanh thật (ít dữ liệu)</option>
+        <option value="hidden">YouTube – ẩn video</option>
+        <option value="video">YouTube – xem video</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="saver"> Tiết kiệm dữ liệu tối đa</label>
     <label><input type="checkbox" id="loop"> Lặp danh sách</label>
-    <label><input type="checkbox" id="keepAlive" checked> Giữ phát khi tắt màn hình</label>
+    <label><input type="checkbox" id="keepAlive" checked> Cố giữ phát nền (chế độ YouTube)</label>
   </div>
   <div class="status" id="status"></div>
 
@@ -134,7 +150,8 @@
       <li style="display:list-item;cursor:auto">Bấm <b>Phát</b> ít nhất một lần bằng tay trước khi tắt màn hình (trình duyệt yêu cầu thao tác người dùng).</li>
       <li style="display:list-item;cursor:auto">Android: dùng Chrome, Firefox hoặc Samsung Internet. Có thể “Thêm vào màn hình chính” để chạy như app.</li>
       <li style="display:list-item;cursor:auto">Nếu nhạc dừng khi khoá máy, mở lại thanh thông báo / màn hình khoá và bấm ▶ — trang sẽ tự phát tiếp.</li>
-      <li style="display:list-item;cursor:auto">iPhone/iPad: Safari thường dừng video nhúng khi khoá máy; bấm ▶ trên màn hình khoá để tiếp tục.</li>
+      <li style="display:list-item;cursor:auto">Chế độ <b>🎧 Âm thanh thật</b> phát nền ổn định nhất (kể cả iPhone) và tốn ít dữ liệu nhất (~50–60 MB/giờ, ~25 MB/giờ khi bật “Tiết kiệm dữ liệu tối đa”). Nó dùng máy chủ công cộng Piped/Invidious; nếu máy chủ lỗi, trang tự chuyển sang phát qua YouTube cho bài đó.</li>
+      <li style="display:list-item;cursor:auto">iPhone/iPad ở chế độ YouTube: Safari thường dừng video nhúng khi khoá máy; bấm ▶ trên màn hình khoá để tiếp tục.</li>
       <li style="display:list-item;cursor:auto">Tắt chế độ tiết kiệm pin cho trình duyệt để tránh bị hệ thống dừng.</li>
     </ul>
   </details>
@@ -203,6 +220,38 @@
   }
 
   // ---------- Player ----------
+  // Hai bộ phát dùng chung giao diện: 'yt' = YouTube nhúng, 'audio' = <audio> lấy luồng âm thanh qua Piped/Invidious.
+  let mode = store.get('mode', store.get('audioOnly', false) ? 'hidden' : 'audio');
+  let using = mode === 'audio' ? 'audio' : 'yt';   // bộ phát của bài hiện tại (có thể dự phòng sang 'yt')
+  let loadToken = 0;          // huỷ các lần tải cũ khi chuyển bài nhanh
+  let audioLoadedId = null;   // id bài đang nạp trong <audio>
+  let audioSrcInfo = null;    // {id, key, time} nguồn đang phát
+  let probing = false;        // đang thử nguồn, bỏ qua lỗi tạm
+
+  const audio = new Audio();
+  audio.preload = 'auto';
+  audio.setAttribute('playsinline', '');
+
+  const ytE = {
+    playing: () => ready && player.getPlayerState() === YT.PlayerState.PLAYING,
+    play: () => { if (ready) player.playVideo(); },
+    pause: () => { if (ready) player.pauseVideo(); },
+    time: () => (ready && player.getCurrentTime()) || 0,
+    dur: () => (ready && player.getDuration()) || 0,
+    seek: (t) => { if (ready) player.seekTo(t, true); },
+    stop: () => { try { if (ready) player.stopVideo(); } catch {} },
+  };
+  const auE = {
+    playing: () => !!audioLoadedId && !audio.paused && !audio.ended,
+    play: () => { if (!audioLoadedId) playIndex(idx, true); else audio.play().catch(() => {}); },
+    pause: () => audio.pause(),
+    time: () => audio.currentTime || 0,
+    dur: () => (isFinite(audio.duration) && audio.duration) || (queue[idx] && queue[idx].dur) || 0,
+    seek: (t) => { try { audio.currentTime = t; } catch {} },
+    stop: () => { audio.pause(); audioLoadedId = null; audioSrcInfo = null; },
+  };
+  const eng = () => (using === 'audio' ? auE : ytE);
+
   window.onYouTubeIframeAPIReady = () => {
     player = new YT.Player('player', {
       host: 'https://www.youtube-nocookie.com',
@@ -210,13 +259,41 @@
       events: {
         onReady: () => {
           ready = true;
-          if (queue[idx]) player.cueVideoById(queue[idx].id);
+          if (using === 'yt' && queue[idx]) player.cueVideoById(queue[idx].id);
         },
-        onStateChange: onState,
-        onError: () => { setStatus('Video lỗi hoặc không cho nhúng — chuyển bài.'); setTimeout(next, 1200); },
+        onStateChange: (e) => { if (using === 'yt') onState(e); },
+        onError: () => {
+          if (using !== 'yt') return;
+          setStatus('Video lỗi hoặc không cho nhúng — chuyển bài.'); setTimeout(next, 1200);
+        },
       },
     });
   };
+
+  // Sự kiện của <audio>
+  audio.addEventListener('playing', () => {
+    if (using !== 'audio' || audio.src === silentUrl) return;
+    $('play').textContent = '⏸';
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    prefetchNext();
+  });
+  audio.addEventListener('pause', () => {
+    if (using !== 'audio' || probing) return;
+    $('play').textContent = '▶';
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  });
+  audio.addEventListener('ended', () => { if (using === 'audio') next(true); });
+  audio.addEventListener('timeupdate', () => { if (audioSrcInfo) audioSrcInfo.time = audio.currentTime; });
+  audio.addEventListener('error', () => {
+    // Link hết hạn / máy chủ ngắt giữa chừng -> thử máy chủ khác, phát tiếp từ chỗ cũ
+    if (using !== 'audio' || probing || !audioSrcInfo || audioSrcInfo.id !== (queue[idx] && queue[idx].id)) return;
+    const { id, key, time } = audioSrcInfo;
+    setStatus('Mất kết nối máy chủ âm thanh — đang thử máy chủ khác…');
+    const token = ++loadToken;
+    loadAudio(id, token, true, time || 0, new Set([key])).then((ok) => {
+      if (!ok && token === loadToken) fallbackYT(id, true, time || 0);
+    });
+  });
 
   function onState(e) {
     const S = YT.PlayerState;
@@ -244,31 +321,158 @@
     updateMediaSession();
   }
 
-  function playIndex(i, autoplay) {
+  async function playIndex(i, autoplay, startAt = 0) {
     if (!queue.length) return;
     idx = (i + queue.length) % queue.length;
     save(); render();
-    if (!ready) return;
-    if (autoplay) { userWantsPlay = true; unlockAudio(); player.loadVideoById(queue[idx].id); }
-    else player.cueVideoById(queue[idx].id);
+    const id = queue[idx].id;
+    const token = ++loadToken;
+    if (autoplay) userWantsPlay = true;
     updateMediaSession();
+    if (mode !== 'audio') { useYT(id, autoplay, startAt); return; }
+
+    ytE.stop();
+    using = 'audio';
+    stopKeepAlive();
+    applyOpts();
+    audio.pause();
+    audioLoadedId = null;
+    if (!autoplay) { $('play').textContent = '▶'; return; } // chỉ nạp khi bấm phát
+    setStatus('Đang lấy âm thanh…');
+    const ok = await loadAudio(id, token, true, startAt);
+    if (!ok && token === loadToken) fallbackYT(id, true, startAt);
   }
+
+  function useYT(id, autoplay, startAt = 0) {
+    if (using === 'audio') auE.stop();
+    using = 'yt';
+    applyOpts();
+    if (!ready) return;
+    if (autoplay) { unlockAudio(); player.loadVideoById({ videoId: id, startSeconds: startAt }); }
+    else player.cueVideoById({ videoId: id, startSeconds: startAt });
+  }
+  function fallbackYT(id, autoplay, startAt) {
+    setStatus('Máy chủ âm thanh không phản hồi — đang phát qua YouTube cho bài này.');
+    useYT(id, autoplay, startAt);
+  }
+
   function next(auto) {
     if (!queue.length) return;
     if (idx + 1 >= queue.length && !$('loop').checked && auto === true) { userWantsPlay = false; return; }
     playIndex(idx + 1, true);
   }
   function prev() {
-    if (ready && player.getCurrentTime() > 4) { player.seekTo(0, true); return; }
+    if (eng().time() > 4) { eng().seek(0); return; }
     playIndex(idx - 1, true);
   }
   function toggle() {
-    if (!ready || !queue.length) return;
+    if (!queue.length) return;
+    const playing = eng().playing();
     unlockAudio();
-    const st = player.getPlayerState();
-    if (st === YT.PlayerState.PLAYING) { userWantsPlay = false; player.pauseVideo(); stopKeepAlive(); }
-    else { userWantsPlay = true; player.playVideo(); }
+    if (playing) { userWantsPlay = false; eng().pause(); stopKeepAlive(); }
+    else { userWantsPlay = true; eng().play(); }
   }
+
+  // ---------- Âm thanh thật qua Piped / Invidious ----------
+  const canPlay = (mime) => !!mime && audio.canPlayType(mime) !== '';
+  function pickAudio(list) {
+    const ok = list.filter((a) => a.url && canPlay(a.mime));
+    if (!ok.length) return null;
+    if ($('saver').checked) return ok.sort((a, b) => a.bitrate - b.bitrate)[0];
+    // mặc định: m4a (AAC ~128 kbps) — tương thích tốt nhất, cả iPhone
+    const mp4 = ok.filter((a) => a.mime.startsWith('audio/mp4'));
+    const pool = mp4.length ? mp4 : ok;
+    return pool.sort((a, b) => b.bitrate - a.bitrate)[0];
+  }
+  async function fetchStream(c, id) {
+    if (c.kind === 'piped') {
+      const d = await getJSON(`${c.base}/streams/${id}`, 9000);
+      const list = (d.audioStreams || [])
+        .filter((a) => !a.audioTrackType || a.audioTrackType === 'ORIGINAL')
+        .map((a) => ({ url: a.url, mime: a.codec ? `${a.mimeType}; codecs="${a.codec}"` : a.mimeType, bitrate: a.bitrate || 0 }));
+      const best = pickAudio(list);
+      if (!best) throw new Error('no audio');
+      return { ...best, title: d.title, author: d.uploader, dur: d.duration };
+    }
+    const d = await getJSON(`${c.base}/api/v1/videos/${id}?local=true`, 9000);
+    const list = (d.adaptiveFormats || [])
+      .filter((f) => (f.type || '').startsWith('audio/') && (!f.audioTrack || f.audioTrack.audioIsDefault !== false))
+      .map((f) => ({ url: new URL(f.url, c.base).href, mime: f.type, bitrate: +f.bitrate || 0 }));
+    const best = pickAudio(list);
+    if (!best) throw new Error('no audio');
+    return { ...best, title: d.title, author: d.author, dur: d.lengthSeconds };
+  }
+  function audioCandidates() {
+    const list = [...PIPED.map((b) => ({ kind: 'piped', base: b })), ...INVID.map((b) => ({ kind: 'invidious', base: b }))];
+    const last = store.get('lastAudioBackend', null);
+    const i = last ? list.findIndex((c) => c.base === last.base) : -1;
+    if (i > 0) list.unshift(...list.splice(i, 1));
+    return list;
+  }
+  // Thử gán src và chờ trình duyệt xác nhận phát được
+  function tryAudioSrc(url, autoplay) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return; done = true; clearTimeout(t);
+        ['loadedmetadata', 'playing', 'error'].forEach((ev, k) => audio.removeEventListener(ev, k < 2 ? onOk : onErr));
+        resolve(ok);
+      };
+      const onOk = () => finish(true), onErr = () => finish(false);
+      audio.addEventListener('loadedmetadata', onOk);
+      audio.addEventListener('playing', onOk);
+      audio.addEventListener('error', onErr);
+      const t = setTimeout(() => finish(false), 12000);
+      audio.src = url;
+      if (autoplay) audio.play().catch((e) => { if (e.name === 'NotSupportedError') finish(false); });
+      else audio.load();
+    });
+  }
+  const prefetch = new Map(); // id -> {key, s, t}
+  async function loadAudio(id, token, autoplay, startAt = 0, skip = new Set()) {
+    probing = true;
+    try {
+      for (const c of audioCandidates()) {
+        const key = c.base;
+        if (skip.has(key)) continue;
+        let s;
+        const pf = prefetch.get(id);
+        try {
+          s = pf && pf.key === key && Date.now() - pf.t < 3600e3 ? pf.s : await fetchStream(c, id);
+        } catch { continue; }
+        if (token !== loadToken) return true; // đã chuyển sang bài khác
+        if (!(await tryAudioSrc(s.url, autoplay))) { prefetch.delete(id); continue; }
+        if (token !== loadToken) return true;
+        audioLoadedId = id;
+        audioSrcInfo = { id, key, time: startAt };
+        store.set('lastAudioBackend', c);
+        if (startAt) auE.seek(startAt);
+        const cur = queue[idx];
+        if (cur && cur.id === id) {
+          let changed = false;
+          if (s.title && !cur.title) { cur.title = s.title; changed = true; }
+          if (s.author && !cur.author) { cur.author = s.author; changed = true; }
+          if (s.dur) cur.dur = s.dur;
+          if (changed) { save(); render(); updateMediaSession(); }
+        }
+        setStatus(`🎧 Âm thanh thật · ${Math.round(s.bitrate / 1000)} kbps · qua ${new URL(c.base).hostname}`, true);
+        prefetchNext();
+        return true;
+      }
+      return false;
+    } finally { probing = false; }
+  }
+  // Lấy trước link bài kế tiếp để chuyển bài khi tắt màn hình không bị khựng
+  function prefetchNext() {
+    const n = queue[idx + 1] || ($('loop').checked ? queue[0] : null);
+    if (!n || !audioSrcInfo || prefetch.has(n.id) || prefetching.has(n.id)) return;
+    const c = audioCandidates().find((x) => x.base === audioSrcInfo.key);
+    if (!c) return;
+    prefetching.add(n.id);
+    fetchStream(c, n.id).then((s) => prefetch.set(n.id, { key: c.base, s, t: Date.now() }))
+      .catch(() => {}).finally(() => prefetching.delete(n.id));
+  }
+  const prefetching = new Set();
 
   // ---------- Playlist expansion ----------
   function addPlaylist(listId, startVideo) {
@@ -461,18 +665,51 @@
   $('play').onclick = toggle;
   $('next').onclick = () => next();
   $('prev').onclick = prev;
-  $('clear').onclick = () => { if (confirm('Xoá toàn bộ danh sách?')) { queue = []; idx = 0; save(); render(); if (ready) player.stopVideo(); } };
+  $('clear').onclick = () => {
+    if (!confirm('Xoá toàn bộ danh sách?')) return;
+    queue = []; idx = 0; save(); render(); userWantsPlay = false; ytE.stop(); auE.stop(); stopKeepAlive();
+  };
 
   // ---------- Options ----------
-  for (const k of ['audioOnly', 'loop', 'keepAlive']) {
+  for (const k of ['saver', 'loop', 'keepAlive']) {
     const el = $(k);
     el.checked = store.get(k, el.checked);
-    el.onchange = () => { store.set(k, el.checked); applyOpts(); };
+    el.onchange = () => { store.set(k, el.checked); applyOpts(); if (k === 'saver') prefetch.clear(); };
   }
+  $('mode').value = mode;
+  $('mode').onchange = () => {
+    const was = userWantsPlay && eng().playing(), t = eng().time();
+    mode = $('mode').value;
+    store.set('mode', mode);
+    if (!queue[idx]) { using = mode === 'audio' ? 'audio' : 'yt'; applyOpts(); return; }
+    unlockAudio();
+    if ((mode === 'audio') !== (using === 'audio')) playIndex(idx, was, t); // đổi bộ phát, giữ vị trí
+    else applyOpts();
+  };
   function applyOpts() {
-    $('wrap').classList.toggle('audio-only', $('audioOnly').checked);
-    if (!$('keepAlive').checked) stopKeepAlive();
+    $('wrap').classList.toggle('audio-only', mode !== 'video');
+    $('wrap').hidden = using === 'audio';
+    if (!$('keepAlive').checked || using === 'audio') stopKeepAlive();
   }
+
+  // ---------- Thanh tua ----------
+  let seeking = false;
+  const clock = (s) => fmtDur(Math.floor(s) || 0).replace('LIVE', '0:00');
+  $('seek').addEventListener('input', () => {
+    seeking = true;
+    $('tCur').textContent = clock($('seek').value / 1000 * eng().dur());
+  });
+  $('seek').addEventListener('change', () => {
+    eng().seek($('seek').value / 1000 * eng().dur());
+    seeking = false;
+  });
+  setInterval(() => {
+    if (seeking) return;
+    const d = eng().dur(), t = eng().time();
+    $('seek').value = d ? Math.round(t / d * 1000) : 0;
+    $('tCur').textContent = clock(t);
+    $('tDur').textContent = clock(d);
+  }, 500);
 
   // ---------- Background playback helpers ----------
   // 1) Âm thanh im lặng chạy song song: giữ cho trang được coi là "đang phát media",
@@ -488,16 +725,24 @@
     for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
     return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
   }
+  let silentUrl, audioPrimed = false;
   function unlockAudio() {
+    if (!silentUrl) silentUrl = makeSilentWav();
+    // iPhone: thẻ <audio> phải được phát một lần trong thao tác chạm thì sau này mới tự phát được (khi chuyển bài, khoá máy)
+    if (!audioPrimed && mode === 'audio') {
+      audioPrimed = true;
+      if (!audio.src) { audio.src = silentUrl; audio.play().then(() => { if (!audioLoadedId) audio.pause(); }).catch(() => {}); }
+    }
+    if (using !== 'yt' || !$('keepAlive').checked) return;
     if (!silent) {
-      silent = new Audio(makeSilentWav());
+      silent = new Audio(silentUrl);
       silent.loop = true;
       silent.volume = 0.01;
       silent.setAttribute('playsinline', '');
     }
-    if ($('keepAlive').checked) silent.play().catch(() => {});
+    silent.play().catch(() => {});
   }
-  function startKeepAlive() { if ($('keepAlive').checked && silent && silent.paused) silent.play().catch(() => {}); }
+  function startKeepAlive() { if (using === 'yt' && $('keepAlive').checked && silent && silent.paused) silent.play().catch(() => {}); }
   function stopKeepAlive() { if (silent) silent.pause(); }
 
   // 2) Khi trang bị ẩn/khoá màn hình mà YouTube tự dừng -> bấm phát lại.
@@ -505,7 +750,7 @@
     clearTimeout(resumeTimer);
     let attempts = 0;
     const tryPlay = () => {
-      if (!userWantsPlay || !ready) return;
+      if (!userWantsPlay || !ready || using !== 'yt') return;
       if (player.getPlayerState() !== YT.PlayerState.PLAYING) {
         player.playVideo();
         if (++attempts < 8) resumeTimer = setTimeout(tryPlay, 500 * attempts);
@@ -514,13 +759,11 @@
     resumeTimer = setTimeout(tryPlay, 150);
   }
   document.addEventListener('visibilitychange', () => {
+    if (using !== 'yt') return; // <audio> tự phát nền, không cần mẹo
     if (document.hidden && userWantsPlay && $('keepAlive').checked) { startKeepAlive(); scheduleResume(); }
-    if (!document.hidden) {
-      setStatus(userWantsPlay ? 'Đang phát nền ✓' : '', userWantsPlay);
-      if (userWantsPlay && ready && player.getPlayerState() !== YT.PlayerState.PLAYING) player.playVideo();
-    }
+    if (!document.hidden && userWantsPlay && ready && !ytE.playing()) player.playVideo();
   });
-  window.addEventListener('pagehide', () => { if (userWantsPlay) scheduleResume(); });
+  window.addEventListener('pagehide', () => { if (userWantsPlay && using === 'yt') scheduleResume(); });
 
   // 3) Media Session: điều khiển trên màn hình khoá / thanh thông báo / tai nghe.
   function updateMediaSession() {
@@ -539,20 +782,20 @@
   if ('mediaSession' in navigator) {
     const ms = navigator.mediaSession;
     const set = (a, f) => { try { ms.setActionHandler(a, f); } catch {} };
-    set('play', () => { userWantsPlay = true; startKeepAlive(); ready && player.playVideo(); });
-    set('pause', () => { userWantsPlay = false; ready && player.pauseVideo(); stopKeepAlive(); });
+    set('play', () => { userWantsPlay = true; startKeepAlive(); eng().play(); });
+    set('pause', () => { userWantsPlay = false; eng().pause(); stopKeepAlive(); });
     set('nexttrack', () => next());
     set('previoustrack', prev);
-    set('seekbackward', (d) => ready && player.seekTo(Math.max(0, player.getCurrentTime() - (d.seekOffset || 10)), true));
-    set('seekforward', (d) => ready && player.seekTo(player.getCurrentTime() + (d.seekOffset || 10), true));
-    set('seekto', (d) => ready && player.seekTo(d.seekTime, true));
+    set('seekbackward', (d) => eng().seek(Math.max(0, eng().time() - (d.seekOffset || 10))));
+    set('seekforward', (d) => eng().seek(eng().time() + (d.seekOffset || 10)));
+    set('seekto', (d) => eng().seek(d.seekTime));
   }
 
-  // 4) Giữ đồng bộ trạng thái im lặng / thanh tiến trình
+  // 4) Đồng bộ thanh tiến trình trên màn hình khoá
   setInterval(() => {
-    if (!ready || !userWantsPlay) return;
+    if (!userWantsPlay) return;
     try {
-      const dur = player.getDuration(), pos = player.getCurrentTime();
+      const dur = eng().dur(), pos = eng().time();
       if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && dur > 0) {
         navigator.mediaSession.setPositionState({ duration: dur, position: Math.min(pos, dur), playbackRate: 1 });
       }
