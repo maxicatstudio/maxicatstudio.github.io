@@ -62,6 +62,11 @@
   li img { width: 72px; height: 40px; object-fit: cover; border-radius: 6px; flex: none; }
   li .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   li .x { padding: 4px 10px; font-size: 14px; }
+  li .dl { padding: 4px 6px; font-size: 13px; min-width: 46px; font-variant-numeric: tabular-nums; }
+  li .dl.done { color: #4ade80; }
+  li .dl.err { color: #fbbf24; }
+  .dlbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: -2px 0 8px; }
+  .dlbar button { font-size: 13px; padding: 4px 10px; }
   .empty { color: var(--muted); font-size: 14px; padding: 8px; }
   #results { margin-top: 10px; }
   #results[hidden] { display: none; }
@@ -130,10 +135,16 @@
     <label><input type="checkbox" id="saver"> Tiết kiệm dữ liệu tối đa</label>
     <label><input type="checkbox" id="loop"> Lặp danh sách</label>
     <label><input type="checkbox" id="keepAlive" checked> Cố giữ phát nền (chế độ YouTube)</label>
+    <label><input type="checkbox" id="autoDl"> 📥 Tự tải danh sách để nghe offline</label>
   </div>
   <div class="status" id="status"></div>
 
   <h2>Danh sách phát <button id="clear" style="font-size:13px;padding:4px 10px">Xoá hết</button></h2>
+  <div class="dlbar">
+    <span id="dlInfo"></span>
+    <button id="dlAll" type="button">⬇ Tải tất cả</button>
+    <button id="dlClear" type="button">Xoá bản tải</button>
+  </div>
   <ul id="queue"></ul>
 
   <details class="settings">
@@ -164,6 +175,8 @@
       <li style="display:list-item;cursor:auto">Chế độ <b>🎧 Âm thanh thật</b> phát nền ổn định nhất (kể cả iPhone) và tốn ít dữ liệu nhất (~50–60 MB/giờ, ~25 MB/giờ khi bật “Tiết kiệm dữ liệu tối đa”). Nó dùng máy chủ công cộng Piped/Invidious; nếu máy chủ lỗi, trang tự chuyển sang phát qua YouTube cho bài đó.</li>
       <li style="display:list-item;cursor:auto">iPhone: mở trang bằng <b>Safari</b> (không mở bên trong app khác như Zalo, Messenger…). Nếu đã “Thêm vào MH chính” mà vẫn dừng khi khoá máy, hãy thử mở trực tiếp trong tab Safari.</li>
       <li style="display:list-item;cursor:auto">iPhone/iPad ở chế độ YouTube: Safari thường dừng video nhúng khi khoá máy; bấm ▶ trên màn hình khoá để tiếp tục.</li>
+      <li style="display:list-item;cursor:auto"><b>Nghe offline:</b> bấm ⬇ ở từng bài hoặc bật “Tự tải danh sách”. Bài đã tải (✓) phát thẳng từ máy, không tốn mạng; khi mất mạng trang tự bỏ qua bài chưa tải. Mở trang ít nhất một lần khi có mạng để trang được lưu lại.</li>
+      <li style="display:list-item;cursor:auto">iPhone: Safari có thể xoá dữ liệu của trang nếu bạn không mở nó trong 7 ngày. Hãy <b>“Thêm vào MH chính”</b> và mở từ biểu tượng đó để bản tải được giữ lâu dài.</li>
       <li style="display:list-item;cursor:auto">Tắt chế độ tiết kiệm pin cho trình duyệt để tránh bị hệ thống dừng.</li>
     </ul>
   </details>
@@ -199,8 +212,11 @@
   }
 
   // ---------- Queue UI ----------
-  const thumb = (id) => `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
-  function save() { store.set('queue', queue); store.set('idx', idx); }
+  const thumb = (id) => thumbUrls.get(id) || `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
+  function save() {
+    store.set('queue', queue); store.set('idx', idx);
+    if ($('autoDl').checked) setTimeout(autoQueue, 0);
+  }
   function render() {
     const ul = $('queue');
     ul.innerHTML = '';
@@ -208,10 +224,13 @@
     queue.forEach((it, i) => {
       const li = document.createElement('li');
       if (i === idx) li.className = 'cur';
-      li.innerHTML = `<img src="${thumb(it.id)}" alt=""><span class="name"></span><button class="x" title="Xoá">✕</button>`;
+      li.dataset.id = it.id;
+      li.innerHTML = `<img src="${thumb(it.id)}" alt=""><span class="name"></span><button class="dl"></button><button class="x" title="Xoá">✕</button>`;
       li.querySelector('.name').textContent = it.title || it.id;
+      paintDl(it.id, li);
       li.onclick = (e) => {
         if (e.target.classList.contains('x')) { remove(i); return; }
+        if (e.target.classList.contains('dl')) { dlClick(it.id); return; }
         playIndex(i, true);
       };
       ul.appendChild(li);
@@ -225,10 +244,225 @@
     }
   }
   function remove(i) {
-    queue.splice(i, 1);
+    const [it] = queue.splice(i, 1);
     if (i < idx) idx--;
     if (idx >= queue.length) idx = Math.max(0, queue.length - 1);
+    if (it) { dlState.delete(it.id); if (localIds.has(it.id)) deleteLocal(it.id); }
     save(); render();
+  }
+
+  // ---------- Offline: tải âm thanh về máy (IndexedDB) ----------
+  const localIds = new Set();   // id các bài đã tải
+  const thumbUrls = new Map();  // id -> blob URL ảnh đã lưu
+  const dlState = new Map();    // id -> 'queued' | số % | 'error'
+  const dlQueue = [];
+  const dlFailed = new Set();
+  let dlBusy = false, persistAsked = false, dbP = null, offlineReady = false;
+
+  function db() {
+    if (!dbP) dbP = new Promise((res, rej) => {
+      const r = indexedDB.open('ytbg', 1);
+      r.onupgradeneeded = () => { r.result.createObjectStore('audio'); r.result.createObjectStore('thumb'); };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return dbP;
+  }
+  async function idb(name, rw, fn) {
+    const d = await db();
+    return new Promise((res, rej) => {
+      const tx = d.transaction(name, rw ? 'readwrite' : 'readonly');
+      const req = fn(tx.objectStore(name));
+      tx.oncomplete = () => res(req && req.result);
+      tx.onerror = tx.onabort = () => rej(tx.error);
+    });
+  }
+  const getLocal = (id) => idb('audio', false, (s) => s.get(id));
+
+  async function initOffline() {
+    try {
+      (await idb('audio', false, (s) => s.getAllKeys())).forEach((k) => localIds.add(k));
+      const tk = await idb('thumb', false, (s) => s.getAllKeys());
+      const tv = await idb('thumb', false, (s) => s.getAll());
+      tk.forEach((k, i) => thumbUrls.set(k, URL.createObjectURL(tv[i])));
+    } catch (e) { logEv('Không mở được bộ nhớ offline: ' + e.message); }
+    offlineReady = true;
+    render(); updateDlInfo(); autoQueue();
+  }
+
+  function dlLabel(id) {
+    if (localIds.has(id)) return ['✓', 'done', 'Đã tải về máy — bấm để xoá bản tải'];
+    const st = dlState.get(id);
+    if (st === 'queued') return ['…', '', 'Đang chờ tải'];
+    if (st === 'error') return ['⚠', 'err', 'Tải lỗi — bấm để thử lại'];
+    if (typeof st === 'number') return [st + '%', '', 'Đang tải'];
+    return ['⬇', '', 'Tải về để nghe offline'];
+  }
+  function paintDl(id, li) {
+    li = li || $('queue').querySelector(`li[data-id="${id}"]`);
+    const b = li && li.querySelector('.dl');
+    if (!b) return;
+    const [txt, cls, title] = dlLabel(id);
+    b.textContent = txt; b.className = 'dl ' + cls; b.title = title;
+  }
+  function dlClick(id) {
+    if (localIds.has(id)) { if (confirm('Xoá bản đã tải của bài này?')) deleteLocal(id); return; }
+    const st = dlState.get(id);
+    if (st === 'queued' || typeof st === 'number') return;
+    enqueueDl(id, true);
+  }
+
+  function enqueueDl(id, front) {
+    if (!offlineReady || localIds.has(id)) return;
+    const st = dlState.get(id);
+    if (st === 'queued' || typeof st === 'number') return;
+    dlFailed.delete(id);
+    dlState.set(id, 'queued');
+    front ? dlQueue.unshift(id) : dlQueue.push(id);
+    paintDl(id);
+    pumpDl();
+  }
+  function autoQueue() {
+    if (!offlineReady || !$('autoDl').checked) return;
+    queue.forEach((q) => { if (!localIds.has(q.id) && !dlState.has(q.id) && !dlFailed.has(q.id)) enqueueDl(q.id); });
+  }
+  const waitOnline = () => new Promise((r) => window.addEventListener('online', r, { once: true }));
+
+  async function pumpDl() {
+    if (dlBusy) return;
+    dlBusy = true;
+    if (!persistAsked) { // xin trình duyệt đừng tự xoá dữ liệu khi máy đầy
+      persistAsked = true;
+      try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}
+    }
+    try {
+      while (dlQueue.length) {
+        if (!navigator.onLine) await waitOnline();
+        const id = dlQueue.shift();
+        if (localIds.has(id) || dlState.get(id) !== 'queued') continue; // đã huỷ
+        dlState.set(id, 0); paintDl(id); updateDlInfo();
+        let ok = false;
+        try { ok = await downloadTrack(id); }
+        catch (e) {
+          if (e && e.name === 'QuotaExceededError') {
+            setStatus('Hết dung lượng lưu trữ trên máy — đã dừng tải.');
+            dlQueue.splice(0).forEach((x) => dlState.delete(x));
+          }
+        }
+        if (ok) {
+          dlState.delete(id);
+          logEv('📥 đã tải xong: ' + ((queue.find((q) => q.id === id) || {}).title || id));
+          if (!queue.some((q) => q.id === id)) deleteLocal(id); // bị xoá khỏi danh sách trong lúc tải
+        } else if (dlState.has(id)) { dlState.set(id, 'error'); dlFailed.add(id); }
+        paintDl(id); updateDlInfo();
+      }
+    } finally { dlBusy = false; }
+  }
+
+  // Tải toàn bộ file vào bộ nhớ, có tiến độ %, huỷ nếu 30 giây không nhận được dữ liệu
+  async function fetchBlob(url, type, onProg) {
+    const ctl = new AbortController();
+    let timer;
+    const kick = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), 30000); };
+    kick();
+    try {
+      const r = await fetch(url, { signal: ctl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const total = +r.headers.get('Content-Length') || 0;
+      if (!r.body) return await r.blob();
+      const reader = r.body.getReader();
+      const parts = [];
+      let got = 0, last = -1;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value); got += value.length; kick();
+        const pct = total ? Math.min(99, Math.floor(got * 100 / total)) : -1;
+        if (pct !== last) { last = pct; if (pct >= 0) onProg(pct); }
+      }
+      if (total && got < total) throw new Error('Tải thiếu dữ liệu');
+      return new Blob(parts, { type });
+    } finally { clearTimeout(timer); }
+  }
+
+  async function downloadTrack(id) {
+    for (const c of audioCandidates()) {
+      let s;
+      try { s = await fetchStream(c, id); } catch { continue; }
+      if (!dlState.has(id)) return false; // đã huỷ
+      try {
+        const blob = await fetchBlob(s.url, s.mime.split(';')[0], (p) => { dlState.set(id, p); paintDl(id); });
+        if (!blob || blob.size < 20000) continue;
+        const it = queue.find((q) => q.id === id) || {};
+        await idb('audio', true, (st) => st.put({
+          blob, mime: s.mime, bitrate: s.bitrate, size: blob.size, t: Date.now(),
+          title: it.title || s.title, author: it.author || s.author, dur: s.dur,
+        }, id));
+        localIds.add(id);
+        if (!it.title && s.title) { it.title = s.title; it.author = s.author; store.set('queue', queue); render(); }
+        saveThumb(id);
+        return true;
+      } catch (e) {
+        if (e && e.name === 'QuotaExceededError') throw e;
+        logEv(`tải lỗi qua ${new URL(c.base).hostname}: ${e.message || e.name}`);
+      }
+    }
+    return false;
+  }
+  async function saveThumb(id) {
+    try {
+      const r = await fetch(`https://i.ytimg.com/vi/${id}/mqdefault.jpg`);
+      if (!r.ok) return;
+      const b = await r.blob();
+      await idb('thumb', true, (st) => st.put(b, id));
+      thumbUrls.set(id, URL.createObjectURL(b));
+    } catch {} // ảnh không bắt buộc
+  }
+  async function deleteLocal(id) {
+    localIds.delete(id);
+    const u = thumbUrls.get(id); if (u) { URL.revokeObjectURL(u); thumbUrls.delete(id); }
+    try { await idb('audio', true, (s) => s.delete(id)); await idb('thumb', true, (s) => s.delete(id)); } catch {}
+    paintDl(id); updateDlInfo();
+  }
+  async function updateDlInfo() {
+    const n = queue.filter((q) => localIds.has(q.id)).length;
+    const busy = [...dlState.values()].filter((v) => v === 'queued' || typeof v === 'number').length;
+    let txt = `📥 Đã tải ${n}/${queue.length} bài` + (busy ? ` · đang tải ${busy}` : '');
+    try {
+      const est = navigator.storage && navigator.storage.estimate && await navigator.storage.estimate();
+      if (est && est.usage != null) txt += ` · dùng ${(est.usage / 1048576).toFixed(0)} MB`;
+    } catch {}
+    $('dlInfo').textContent = txt;
+  }
+  $('dlAll').onclick = () => { dlFailed.clear(); queue.forEach((q) => enqueueDl(q.id)); };
+  $('dlClear').onclick = async () => {
+    if (!localIds.size || !confirm(`Xoá tất cả ${localIds.size} bản đã tải khỏi máy?`)) return;
+    dlQueue.splice(0).forEach((x) => dlState.delete(x));
+    for (const id of [...localIds]) await deleteLocal(id);
+  };
+  window.addEventListener('online', () => { dlFailed.clear(); autoQueue(); });
+
+  // Phát bản đã tải (không cần mạng)
+  let localUrl = null;
+  async function playLocal(id, token, startAt) {
+    let rec = null;
+    try { rec = await getLocal(id); } catch {}
+    if (token !== loadToken) return true;
+    if (!rec || !rec.blob) { localIds.delete(id); paintDl(id); return false; }
+    const prevUrl = localUrl;
+    localUrl = URL.createObjectURL(rec.blob);
+    probing = true;
+    let ok;
+    try { ok = await tryAudioSrc(localUrl, true); } finally { probing = false; }
+    if (prevUrl) URL.revokeObjectURL(prevUrl);
+    if (token !== loadToken) return true;
+    if (!ok) return false;
+    audioLoadedId = id;
+    audioSrcInfo = { id, key: 'local', time: startAt };
+    if (startAt) auE.seek(startAt);
+    setStatus('📥 Đang phát bản đã tải về máy (không tốn mạng)', true);
+    prefetchNext();
+    return true;
   }
 
   // ---------- Player ----------
@@ -389,9 +623,22 @@
     save(); render();
     const id = queue[idx].id;
     const token = ++loadToken;
+    const local = localIds.has(id);
+    // Mất mạng mà bài này chưa tải -> nhảy tới bài đã tải kế tiếp
+    if (!local && !navigator.onLine) {
+      const n = queue.length, limit = $('loop').checked ? n : n - idx;
+      for (let j = 1; j < limit; j++) {
+        const k = (idx + j) % n;
+        if (localIds.has(queue[k].id)) { setStatus('Đang offline — bỏ qua bài chưa tải.'); return playIndex(k, autoplay); }
+      }
+      setStatus('Đang offline và không còn bài nào đã tải về để phát.');
+      userWantsPlay = false; eng().pause();
+      return;
+    }
     if (autoplay) userWantsPlay = true;
     updateMediaSession();
-    if (mode !== 'audio') { useYT(id, autoplay, startAt); return; }
+    // Chế độ YouTube vẫn dùng bản đã tải khi offline
+    if (mode !== 'audio' && !(local && !navigator.onLine)) { useYT(id, autoplay, startAt); return; }
 
     destroyYT();
     using = 'audio';
@@ -401,6 +648,8 @@
     audio.pause();
     audioLoadedId = null;
     if (!autoplay) { $('play').textContent = '▶'; return; } // chỉ nạp khi bấm phát
+    if (local && await playLocal(id, token, startAt)) return;
+    if (token !== loadToken) return;
     setStatus('Đang lấy âm thanh…');
     const ok = await loadAudio(id, token, true, startAt);
     if (!ok && token === loadToken) fallbackYT(id, true, startAt);
@@ -529,7 +778,7 @@
   // Lấy trước link bài kế tiếp để chuyển bài khi tắt màn hình không bị khựng
   function prefetchNext() {
     const n = queue[idx + 1] || ($('loop').checked ? queue[0] : null);
-    if (!n || !audioSrcInfo || prefetch.has(n.id) || prefetching.has(n.id)) return;
+    if (!n || !audioSrcInfo || localIds.has(n.id) || prefetch.has(n.id) || prefetching.has(n.id)) return;
     const c = audioCandidates().find((x) => x.base === audioSrcInfo.key);
     if (!c) return;
     prefetching.add(n.id);
@@ -748,15 +997,21 @@
   $('next').onclick = () => next();
   $('prev').onclick = prev;
   $('clear').onclick = () => {
-    if (!confirm('Xoá toàn bộ danh sách?')) return;
+    if (!confirm('Xoá toàn bộ danh sách' + (localIds.size ? ' (kèm các bản đã tải về máy)' : '') + '?')) return;
+    dlQueue.splice(0).forEach((x) => dlState.delete(x));
+    [...localIds].forEach((id) => deleteLocal(id));
     queue = []; idx = 0; save(); render(); userWantsPlay = false; ytE.stop(); auE.stop(); stopKeepAlive();
   };
 
   // ---------- Options ----------
-  for (const k of ['saver', 'loop', 'keepAlive']) {
+  for (const k of ['saver', 'loop', 'keepAlive', 'autoDl']) {
     const el = $(k);
     el.checked = store.get(k, el.checked);
-    el.onchange = () => { store.set(k, el.checked); applyOpts(); if (k === 'saver') prefetch.clear(); };
+    el.onchange = () => {
+      store.set(k, el.checked); applyOpts();
+      if (k === 'saver') prefetch.clear();
+      if (k === 'autoDl' && el.checked) { dlFailed.clear(); autoQueue(); }
+    };
   }
   $('mode').value = mode;
   $('mode').onchange = () => {
@@ -854,10 +1109,11 @@
     if (!('mediaSession' in navigator)) return;
     const cur = queue[idx];
     if (!cur) return;
+    const lt = thumbUrls.get(cur.id);
     navigator.mediaSession.metadata = new MediaMetadata({
       title: cur.title || 'YouTube',
       artist: cur.author || 'YT Nền',
-      artwork: [
+      artwork: lt ? [{ src: lt, sizes: '320x180', type: 'image/jpeg' }] : [
         { src: `https://i.ytimg.com/vi/${cur.id}/mqdefault.jpg`, sizes: '320x180', type: 'image/jpeg' },
         { src: `https://i.ytimg.com/vi/${cur.id}/hqdefault.jpg`, sizes: '480x360', type: 'image/jpeg' },
       ],
@@ -899,6 +1155,7 @@
 
   applyOpts();
   render();
+  initOffline();
   $('log').textContent = logs.slice().reverse().join('\n');
   logEv(`mở trang · ${navigator.standalone || matchMedia('(display-mode: standalone)').matches ? 'app màn hình chính' : 'trình duyệt'}` +
     ` · audioSession=${navigator.audioSession ? navigator.audioSession.type : 'không hỗ trợ'}`);
