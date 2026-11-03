@@ -142,6 +142,11 @@
       Muốn ổn định hơn, hãy dán <b>YouTube Data API key</b> của bạn (tạo miễn phí tại console.cloud.google.com → bật “YouTube Data API v3” → Credentials → API key).
       Key chỉ lưu trên máy này.</p>
     <input id="apiKey" type="text" placeholder="YouTube API key (không bắt buộc)" autocomplete="off" spellcheck="false">
+    <p style="margin-top:14px"><b>Máy chủ riêng</b> (tự host, xem thư mục <code>ytbg-server</code>): dán địa chỉ máy chủ in ra khi chạy, dạng
+      <code>https://ten-mien-cua-ban/khoa-bi-mat</code>. Khi có, trang luôn dùng máy chủ này trước cho cả tìm kiếm lẫn âm thanh.</p>
+    <input id="ownServer" type="url" placeholder="https://… (không bắt buộc)" autocomplete="off" spellcheck="false">
+    <button id="ownTest" type="button" style="margin-top:6px;font-size:13px">Kiểm tra máy chủ</button>
+    <span id="ownInfo" style="margin-left:8px;font-size:13px"></span>
   </details>
 
   <details>
@@ -465,6 +470,7 @@
     const last = store.get('lastAudioBackend', null);
     const i = last ? list.findIndex((c) => c.base === last.base) : -1;
     if (i > 0) list.unshift(...list.splice(i, 1));
+    if (ownBase()) list.unshift({ kind: 'piped', base: ownBase() }); // máy chủ riêng luôn thử trước
     return list;
   }
   // Thử gán src và chờ trình duyệt xác nhận phát được
@@ -583,7 +589,10 @@
   const INVID = ['https://inv.nadeko.net', 'https://invidious.nerdvpn.de', 'https://iv.ggtyler.dev', 'https://invidious.privacyredirect.com'];
   let sState = null; // {q, next, backend, page}
 
+  // Địa chỉ máy chủ riêng (tự host), dạng https://host/khoa
+  const ownBase = () => (store.get('ownServer', '') || '').trim().replace(/\/+$/, '');
   async function getJSON(url, ms = 7000) {
+    if (ownBase() && String(url).startsWith(ownBase())) ms = Math.max(ms, 30000); // yt-dlp cần vài giây
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), ms);
     try {
@@ -641,13 +650,15 @@
   // Thứ tự thử: API key (nếu có) → máy chủ hoạt động lần trước → các máy chủ còn lại
   function candidates() {
     const list = [];
+    if (ownBase()) list.push({ kind: 'piped', base: ownBase() });
     if ($('apiKey').value.trim()) list.push({ kind: 'youtube' });
     PIPED.forEach((b) => list.push({ kind: 'piped', base: b }));
     INVID.forEach((b) => list.push({ kind: 'invidious', base: b }));
     const last = store.get('lastBackend', null);
     if (last) {
       const i = list.findIndex((c) => c.kind === last.kind && c.base === last.base);
-      if (i > 0 && list[0].kind !== 'youtube') list.unshift(...list.splice(i, 1));
+      const fixed = (ownBase() ? 1 : 0) + ($('apiKey').value.trim() ? 1 : 0); // máy chủ riêng / API key giữ vị trí đầu
+      if (i > fixed) list.splice(fixed, 0, ...list.splice(i, 1));
     }
     return list;
   }
@@ -720,6 +731,19 @@
   $('resMore').onclick = () => sState && search(sState.q, true);
   $('apiKey').value = store.get('apiKey', '');
   $('apiKey').onchange = () => store.set('apiKey', $('apiKey').value.trim());
+  $('ownServer').value = ownBase();
+  $('ownServer').onchange = () => { store.set('ownServer', $('ownServer').value.trim().replace(/\/+$/, '')); prefetch.clear(); $('ownInfo').textContent = ''; };
+  $('ownTest').onclick = async () => {
+    $('ownServer').onchange();
+    const b = ownBase(), info = $('ownInfo');
+    if (!b) { info.textContent = 'Chưa nhập địa chỉ.'; return; }
+    if (!b.startsWith('https://')) { info.textContent = '⚠ Cần https:// (trình duyệt chặn http từ trang https).'; return; }
+    info.textContent = 'Đang kiểm tra…';
+    try {
+      const j = await getJSON(b + '/', 10000);
+      info.textContent = j.ok ? `✓ Hoạt động · yt-dlp ${j.yt_dlp}` : '✗ Phản hồi lạ';
+    } catch (e) { info.textContent = '✗ Không kết nối được (' + (e.name === 'AbortError' ? 'hết thời gian' : e.message) + ') — kiểm tra địa chỉ, khoá, HTTPS.'; }
+  };
   $('play').onclick = toggle;
   $('next').onclick = () => next();
   $('prev').onclick = prev;

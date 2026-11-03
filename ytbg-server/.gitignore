@@ -1,0 +1,7 @@
+config.json
+cookies.txt
+.venv/
+bin/
+logs/
+caddy-data/
+__pycache__/
