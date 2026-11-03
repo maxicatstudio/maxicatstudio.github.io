@@ -145,12 +145,19 @@
   </details>
 
   <details>
+    <summary>Nhật ký phát (để báo lỗi)</summary>
+    <p>Nếu nhạc vẫn dừng khi khoá máy: phát nhạc → khoá máy chờ ~10 giây → mở lại, rồi chụp màn hình phần này gửi cho người hỗ trợ.</p>
+    <pre id="log" style="white-space:pre-wrap;font-size:12px;background:var(--card);padding:10px;border-radius:8px;max-height:260px;overflow:auto"></pre>
+  </details>
+
+  <details>
     <summary>Mẹo nghe khi tắt màn hình</summary>
     <ul style="list-style:disc;padding-left:20px">
       <li style="display:list-item;cursor:auto">Bấm <b>Phát</b> ít nhất một lần bằng tay trước khi tắt màn hình (trình duyệt yêu cầu thao tác người dùng).</li>
       <li style="display:list-item;cursor:auto">Android: dùng Chrome, Firefox hoặc Samsung Internet. Có thể “Thêm vào màn hình chính” để chạy như app.</li>
       <li style="display:list-item;cursor:auto">Nếu nhạc dừng khi khoá máy, mở lại thanh thông báo / màn hình khoá và bấm ▶ — trang sẽ tự phát tiếp.</li>
       <li style="display:list-item;cursor:auto">Chế độ <b>🎧 Âm thanh thật</b> phát nền ổn định nhất (kể cả iPhone) và tốn ít dữ liệu nhất (~50–60 MB/giờ, ~25 MB/giờ khi bật “Tiết kiệm dữ liệu tối đa”). Nó dùng máy chủ công cộng Piped/Invidious; nếu máy chủ lỗi, trang tự chuyển sang phát qua YouTube cho bài đó.</li>
+      <li style="display:list-item;cursor:auto">iPhone: mở trang bằng <b>Safari</b> (không mở bên trong app khác như Zalo, Messenger…). Nếu đã “Thêm vào MH chính” mà vẫn dừng khi khoá máy, hãy thử mở trực tiếp trong tab Safari.</li>
       <li style="display:list-item;cursor:auto">iPhone/iPad ở chế độ YouTube: Safari thường dừng video nhúng khi khoá máy; bấm ▶ trên màn hình khoá để tiếp tục.</li>
       <li style="display:list-item;cursor:auto">Tắt chế độ tiết kiệm pin cho trình duyệt để tránh bị hệ thống dừng.</li>
     </ul>
@@ -228,9 +235,31 @@
   let audioSrcInfo = null;    // {id, key, time} nguồn đang phát
   let probing = false;        // đang thử nguồn, bỏ qua lỗi tạm
 
-  const audio = new Audio();
+  // Thẻ <audio> gắn vào trang (iOS xử lý phát nền ổn định hơn so với Audio() đứng riêng)
+  const audio = document.createElement('audio');
   audio.preload = 'auto';
   audio.setAttribute('playsinline', '');
+  audio.setAttribute('webkit-playsinline', '');
+  document.body.appendChild(audio);
+
+  // iOS 16.4+: khai báo đây là trình phát nhạc -> tiếp tục phát khi khoá máy / gạt nút im lặng
+  function setAudioSession() {
+    try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch {}
+  }
+  setAudioSession();
+
+  // ---------- Nhật ký (giúp tìm lỗi phát nền) ----------
+  const logs = store.get('log', []);
+  function logEv(msg) {
+    const d = new Date();
+    const t = d.toTimeString().slice(0, 8);
+    logs.push(`${t} ${document.hidden ? '[nền]' : '[mở]'} ${msg}`);
+    if (logs.length > 40) logs.splice(0, logs.length - 40);
+    store.set('log', logs);
+    const el = $('log');
+    if (el) el.textContent = logs.slice().reverse().join('\n');
+  }
+  let hiddenAt = 0;
 
   const ytE = {
     playing: () => ready && player.getPlayerState() === YT.PlayerState.PLAYING,
@@ -252,14 +281,22 @@
   };
   const eng = () => (using === 'audio' ? auE : ytE);
 
-  window.onYouTubeIframeAPIReady = () => {
+  // Khung YouTube chỉ được tạo khi cần (chế độ YouTube hoặc dự phòng) — ở chế độ âm thanh
+  // không có khung video nào trong trang, tránh việc Safari dừng mọi media khi trang xuống nền.
+  let apiReady = false, pendingYT = null;
+  window.onYouTubeIframeAPIReady = () => { apiReady = true; if (using === 'yt' || pendingYT) ensureYT(); };
+  function ensureYT() {
+    if (player || !apiReady) return;
+    if (!$('player')) { const d = document.createElement('div'); d.id = 'player'; $('wrap').appendChild(d); }
     player = new YT.Player('player', {
       host: 'https://www.youtube-nocookie.com',
       playerVars: { playsinline: 1, rel: 0, modestbranding: 1, autoplay: 0 },
       events: {
         onReady: () => {
           ready = true;
-          if (using === 'yt' && queue[idx]) player.cueVideoById(queue[idx].id);
+          const p = pendingYT || (using === 'yt' && queue[idx] ? { id: queue[idx].id, autoplay: false, startAt: 0 } : null);
+          pendingYT = null;
+          if (p && using === 'yt') useYT(p.id, p.autoplay, p.startAt);
         },
         onStateChange: (e) => { if (using === 'yt') onState(e); },
         onError: () => {
@@ -268,21 +305,41 @@
         },
       },
     });
-  };
+  }
+  function destroyYT() {
+    pendingYT = null;
+    if (!player) return;
+    try { player.destroy(); } catch {}
+    player = null; ready = false;
+    const old = $('player'); if (old) old.remove();
+  }
 
   // Sự kiện của <audio>
   audio.addEventListener('playing', () => {
     if (using !== 'audio' || audio.src === silentUrl) return;
+    logEv('▶ đang phát');
     $('play').textContent = '⏸';
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
     prefetchNext();
   });
   audio.addEventListener('pause', () => {
-    if (using !== 'audio' || probing) return;
+    if (using !== 'audio' || probing || audio.src === silentUrl) return;
+    logEv('⏸ bị dừng' + (userWantsPlay ? ' (không phải do bạn bấm)' : ''));
+    // iOS đôi khi dừng nhạc ngay lúc khoá máy -> phát lại. Chỉ trong vài giây đầu sau khi
+    // trang bị ẩn, để rút tai nghe / cuộc gọi đến vẫn dừng nhạc bình thường.
+    if (userWantsPlay && document.hidden && !audio.ended && Date.now() - hiddenAt < 4000) {
+      setTimeout(() => {
+        if (!userWantsPlay || !audio.paused) return;
+        setAudioSession();
+        audio.play().then(() => logEv('↻ tự phát lại OK')).catch((e) => logEv('↻ tự phát lại lỗi: ' + e.name));
+      }, 300);
+      return;
+    }
     $('play').textContent = '▶';
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   });
-  audio.addEventListener('ended', () => { if (using === 'audio') next(true); });
+  audio.addEventListener('ended', () => { if (using === 'audio') { logEv('hết bài'); next(true); } });
+  audio.addEventListener('stalled', () => { if (using === 'audio' && audioLoadedId) logEv('mạng chậm (stalled)'); });
   audio.addEventListener('timeupdate', () => { if (audioSrcInfo) audioSrcInfo.time = audio.currentTime; });
   audio.addEventListener('error', () => {
     // Link hết hạn / máy chủ ngắt giữa chừng -> thử máy chủ khác, phát tiếp từ chỗ cũ
@@ -331,8 +388,9 @@
     updateMediaSession();
     if (mode !== 'audio') { useYT(id, autoplay, startAt); return; }
 
-    ytE.stop();
+    destroyYT();
     using = 'audio';
+    setAudioSession();
     stopKeepAlive();
     applyOpts();
     audio.pause();
@@ -347,7 +405,7 @@
     if (using === 'audio') auE.stop();
     using = 'yt';
     applyOpts();
-    if (!ready) return;
+    if (!ready) { pendingYT = { id, autoplay, startAt }; ensureYT(); return; }
     if (autoplay) { unlockAudio(); player.loadVideoById({ videoId: id, startSeconds: startAt }); }
     else player.cueVideoById({ videoId: id, startSeconds: startAt });
   }
@@ -515,7 +573,7 @@
     const p = parse(text);
     if (!p) { $('url').blur(); search(text); return; }
     $('url').value = '';
-    if (p.list && ready) addPlaylist(p.list, p.video);
+    if (p.list && apiReady) addPlaylist(p.list, p.video);
     else addVideos([p.video]);
   };
 
@@ -759,6 +817,8 @@
     resumeTimer = setTimeout(tryPlay, 150);
   }
   document.addEventListener('visibilitychange', () => {
+    if (document.hidden) hiddenAt = Date.now();
+    if (userWantsPlay) logEv(document.hidden ? 'trang xuống nền / khoá máy' : 'mở lại trang' + (using === 'audio' ? (audio.paused ? ' — nhạc đang dừng' : ' — nhạc vẫn phát ✓') : ''));
     if (using !== 'yt') return; // <audio> tự phát nền, không cần mẹo
     if (document.hidden && userWantsPlay && $('keepAlive').checked) { startKeepAlive(); scheduleResume(); }
     if (!document.hidden && userWantsPlay && ready && !ytE.playing()) player.playVideo();
@@ -815,6 +875,9 @@
 
   applyOpts();
   render();
+  $('log').textContent = logs.slice().reverse().join('\n');
+  logEv(`mở trang · ${navigator.standalone || matchMedia('(display-mode: standalone)').matches ? 'app màn hình chính' : 'trình duyệt'}` +
+    ` · audioSession=${navigator.audioSession ? navigator.audioSession.type : 'không hỗ trợ'}`);
 
   const tag = document.createElement('script');
   tag.src = 'https://www.youtube.com/iframe_api';
