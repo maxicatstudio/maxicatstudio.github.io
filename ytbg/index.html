@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>YT Nền</title>
+<meta name="theme-color" content="#0f0f12">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+  :root {
+    --bg: #0f0f12; --card: #1a1a20; --text: #f2f2f5; --muted: #9a9aa5;
+    --accent: #ff3b5c; --border: #2a2a33;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 14px; }
+  h1 span { color: var(--accent); }
+  form { display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1; min-width: 0; padding: 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 16px;
+  }
+  button {
+    padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); font-size: 15px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:active { transform: scale(.97); }
+  .player-wrap {
+    margin-top: 14px; position: relative; aspect-ratio: 16/9; background: #000;
+    border-radius: 12px; overflow: hidden;
+  }
+  .player-wrap.audio-only { aspect-ratio: auto; height: 1px; opacity: 0.01; }
+  #player, .player-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .now { margin-top: 12px; display: flex; gap: 12px; align-items: center; }
+  .now img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; background: var(--card); }
+  .now .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .now .s { color: var(--muted); font-size: 13px; }
+  .controls { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .controls button { flex: 1; min-width: 64px; font-size: 18px; }
+  .opts { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: 14px; }
+  .opts label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .status { margin-top: 10px; font-size: 13px; color: var(--muted); min-height: 20px; }
+  .status.on { color: #4ade80; }
+  h2 { font-size: 16px; margin: 22px 0 8px; display: flex; justify-content: space-between; align-items: center; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li {
+    display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px;
+    border: 1px solid transparent; cursor: pointer;
+  }
+  li:hover { background: var(--card); }
+  li.cur { border-color: var(--accent); background: var(--card); }
+  li img { width: 72px; height: 40px; object-fit: cover; border-radius: 6px; flex: none; }
+  li .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li .x { padding: 4px 10px; font-size: 14px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 8px; }
+  details { margin-top: 22px; color: var(--muted); font-size: 14px; }
+  details summary { cursor: pointer; color: var(--text); }
+</style>
+</head>
+<body>
+<main>
+  <h1>▶ YT <span>Nền</span></h1>
+
+  <form id="addForm">
+    <input id="url" type="text" placeholder="Dán link YouTube (video hoặc playlist)…" autocomplete="off">
+    <button class="primary" type="submit">Phát</button>
+  </form>
+
+  <div class="player-wrap" id="wrap"><div id="player"></div></div>
+
+  <div class="now" id="now" hidden>
+    <img id="nowThumb" alt="">
+    <div><div class="t" id="nowTitle"></div><div class="s" id="nowSub"></div></div>
+  </div>
+
+  <div class="controls">
+    <button id="prev" title="Bài trước">⏮</button>
+    <button id="play" title="Phát / Dừng">▶</button>
+    <button id="next" title="Bài tiếp">⏭</button>
+  </div>
+
+  <div class="opts">
+    <label><input type="checkbox" id="audioOnly"> Chỉ âm thanh (ẩn video)</label>
+    <label><input type="checkbox" id="loop"> Lặp danh sách</label>
+    <label><input type="checkbox" id="keepAlive" checked> Giữ phát khi tắt màn hình</label>
+  </div>
+  <div class="status" id="status"></div>
+
+  <h2>Danh sách phát <button id="clear" style="font-size:13px;padding:4px 10px">Xoá hết</button></h2>
+  <ul id="queue"></ul>
+
+  <details>
+    <summary>Mẹo nghe khi tắt màn hình</summary>
+    <ul style="list-style:disc;padding-left:20px">
+      <li style="display:list-item;cursor:auto">Bấm <b>Phát</b> ít nhất một lần bằng tay trước khi tắt màn hình (trình duyệt yêu cầu thao tác người dùng).</li>
+      <li style="display:list-item;cursor:auto">Android: dùng Chrome, Firefox hoặc Samsung Internet. Có thể “Thêm vào màn hình chính” để chạy như app.</li>
+      <li style="display:list-item;cursor:auto">Nếu nhạc dừng khi khoá máy, mở lại thanh thông báo / màn hình khoá và bấm ▶ — trang sẽ tự phát tiếp.</li>
+      <li style="display:list-item;cursor:auto">iPhone/iPad: Safari thường dừng video nhúng khi khoá máy; bấm ▶ trên màn hình khoá để tiếp tục.</li>
+      <li style="display:list-item;cursor:auto">Tắt chế độ tiết kiệm pin cho trình duyệt để tránh bị hệ thống dừng.</li>
+    </ul>
+  </details>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('ytbg:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem('ytbg:' + k, JSON.stringify(v)); } catch {} },
+  };
+
+  let queue = store.get('queue', []);   // [{id, title}]
+  let idx = store.get('idx', 0);
+  let player, ready = false, userWantsPlay = false, resumeTimer = null;
+
+  // ---------- Parse link ----------
+  function parse(input) {
+    input = input.trim();
+    if (/^[\w-]{11}$/.test(input)) return { video: input };
+    let u;
+    try { u = new URL(input.startsWith('http') ? input : 'https://' + input); } catch { return null; }
+    const list = u.searchParams.get('list');
+    let video = u.searchParams.get('v');
+    if (!video) {
+      const m = u.pathname.match(/\/(?:shorts|embed|live|v)\/([\w-]{11})/) ||
+                (u.hostname.includes('youtu.be') && u.pathname.match(/^\/([\w-]{11})/));
+      if (m) video = m[1];
+    }
+    if (!video && !list) return null;
+    return { video, list };
+  }
+
+  // ---------- Queue UI ----------
+  const thumb = (id) => `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
+  function save() { store.set('queue', queue); store.set('idx', idx); }
+  function render() {
+    const ul = $('queue');
+    ul.innerHTML = '';
+    if (!queue.length) { ul.innerHTML = '<div class="empty">Chưa có video nào. Dán link ở trên để bắt đầu.</div>'; }
+    queue.forEach((it, i) => {
+      const li = document.createElement('li');
+      if (i === idx) li.className = 'cur';
+      li.innerHTML = `<img src="${thumb(it.id)}" alt=""><span class="name"></span><button class="x" title="Xoá">✕</button>`;
+      li.querySelector('.name').textContent = it.title || it.id;
+      li.onclick = (e) => {
+        if (e.target.classList.contains('x')) { remove(i); return; }
+        playIndex(i, true);
+      };
+      ul.appendChild(li);
+    });
+    const cur = queue[idx];
+    $('now').hidden = !cur;
+    if (cur) {
+      $('nowThumb').src = thumb(cur.id);
+      $('nowTitle').textContent = cur.title || cur.id;
+      $('nowSub').textContent = `${idx + 1} / ${queue.length}`;
+    }
+  }
+  function remove(i) {
+    queue.splice(i, 1);
+    if (i < idx) idx--;
+    if (idx >= queue.length) idx = Math.max(0, queue.length - 1);
+    save(); render();
+  }
+
+  // ---------- Player ----------
+  window.onYouTubeIframeAPIReady = () => {
+    player = new YT.Player('player', {
+      host: 'https://www.youtube-nocookie.com',
+      playerVars: { playsinline: 1, rel: 0, modestbranding: 1, autoplay: 0 },
+      events: {
+        onReady: () => {
+          ready = true;
+          if (queue[idx]) player.cueVideoById(queue[idx].id);
+        },
+        onStateChange: onState,
+        onError: () => { setStatus('Video lỗi hoặc không cho nhúng — chuyển bài.'); setTimeout(next, 1200); },
+      },
+    });
+  };
+
+  function onState(e) {
+    const S = YT.PlayerState;
+    if (e.data === S.PLAYING) {
+      $('play').textContent = '⏸';
+      updateTitle();
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+      startKeepAlive();
+    } else if (e.data === S.PAUSED) {
+      $('play').textContent = '▶';
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+      // Trình duyệt tự dừng khi trang bị ẩn -> phát lại
+      if (userWantsPlay && document.hidden && $('keepAlive').checked) scheduleResume();
+    } else if (e.data === S.ENDED) {
+      next(true);
+    }
+  }
+
+  function updateTitle() {
+    const data = player.getVideoData && player.getVideoData();
+    const cur = queue[idx];
+    if (data && cur && data.video_id === cur.id && data.title && cur.title !== data.title) {
+      cur.title = data.title; cur.author = data.author; save(); render();
+    }
+    updateMediaSession();
+  }
+
+  function playIndex(i, autoplay) {
+    if (!queue.length) return;
+    idx = (i + queue.length) % queue.length;
+    save(); render();
+    if (!ready) return;
+    if (autoplay) { userWantsPlay = true; unlockAudio(); player.loadVideoById(queue[idx].id); }
+    else player.cueVideoById(queue[idx].id);
+    updateMediaSession();
+  }
+  function next(auto) {
+    if (!queue.length) return;
+    if (idx + 1 >= queue.length && !$('loop').checked && auto === true) { userWantsPlay = false; return; }
+    playIndex(idx + 1, true);
+  }
+  function prev() {
+    if (ready && player.getCurrentTime() > 4) { player.seekTo(0, true); return; }
+    playIndex(idx - 1, true);
+  }
+  function toggle() {
+    if (!ready || !queue.length) return;
+    unlockAudio();
+    const st = player.getPlayerState();
+    if (st === YT.PlayerState.PLAYING) { userWantsPlay = false; player.pauseVideo(); stopKeepAlive(); }
+    else { userWantsPlay = true; player.playVideo(); }
+  }
+
+  // ---------- Playlist expansion ----------
+  function addPlaylist(listId, startVideo) {
+    setStatus('Đang tải playlist…');
+    const tmpDiv = document.createElement('div');
+    tmpDiv.style.cssText = 'position:absolute;width:1px;height:1px;left:-9999px';
+    document.body.appendChild(tmpDiv);
+    const tmp = new YT.Player(tmpDiv, {
+      host: 'https://www.youtube-nocookie.com',
+      playerVars: { listType: 'playlist', list: listId, autoplay: 0 },
+      events: {
+        onReady: () => {
+          let tries = 0;
+          const poll = setInterval(() => {
+            const ids = tmp.getPlaylist && tmp.getPlaylist();
+            if ((ids && ids.length) || ++tries > 20) {
+              clearInterval(poll);
+              tmp.destroy(); tmpDiv.remove();
+              if (!ids || !ids.length) { setStatus('Không đọc được playlist (có thể là riêng tư).'); if (startVideo) addVideos([startVideo]); return; }
+              addVideos(ids, startVideo);
+              setStatus(`Đã thêm ${ids.length} video từ playlist.`);
+            }
+          }, 300);
+        },
+      },
+    });
+  }
+  function addVideos(ids, startAt) {
+    const firstNew = queue.length;
+    ids.forEach((id) => { if (!queue.some((q) => q.id === id)) queue.push({ id }); });
+    const target = queue.findIndex((q) => q.id === (startAt || ids[0]));
+    playIndex(target >= 0 ? target : firstNew, true);
+  }
+
+  $('addForm').onsubmit = (e) => {
+    e.preventDefault();
+    const p = parse($('url').value);
+    if (!p) { setStatus('Link không hợp lệ.'); return; }
+    unlockAudio();
+    $('url').value = '';
+    if (p.list && ready) addPlaylist(p.list, p.video);
+    else addVideos([p.video]);
+  };
+  $('play').onclick = toggle;
+  $('next').onclick = () => next();
+  $('prev').onclick = prev;
+  $('clear').onclick = () => { if (confirm('Xoá toàn bộ danh sách?')) { queue = []; idx = 0; save(); render(); if (ready) player.stopVideo(); } };
+
+  // ---------- Options ----------
+  for (const k of ['audioOnly', 'loop', 'keepAlive']) {
+    const el = $(k);
+    el.checked = store.get(k, el.checked);
+    el.onchange = () => { store.set(k, el.checked); applyOpts(); };
+  }
+  function applyOpts() {
+    $('wrap').classList.toggle('audio-only', $('audioOnly').checked);
+    if (!$('keepAlive').checked) stopKeepAlive();
+  }
+
+  // ---------- Background playback helpers ----------
+  // 1) Âm thanh im lặng chạy song song: giữ cho trang được coi là "đang phát media",
+  //    giúp trình duyệt không treo tab và hiện điều khiển trên màn hình khoá.
+  let silent;
+  function makeSilentWav(seconds = 10, rate = 8000) {
+    const n = seconds * rate, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+    const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+    w(36, 'data'); v.setUint32(40, n, true);
+    for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  }
+  function unlockAudio() {
+    if (!silent) {
+      silent = new Audio(makeSilentWav());
+      silent.loop = true;
+      silent.volume = 0.01;
+      silent.setAttribute('playsinline', '');
+    }
+    if ($('keepAlive').checked) silent.play().catch(() => {});
+  }
+  function startKeepAlive() { if ($('keepAlive').checked && silent && silent.paused) silent.play().catch(() => {}); }
+  function stopKeepAlive() { if (silent) silent.pause(); }
+
+  // 2) Khi trang bị ẩn/khoá màn hình mà YouTube tự dừng -> bấm phát lại.
+  function scheduleResume() {
+    clearTimeout(resumeTimer);
+    let attempts = 0;
+    const tryPlay = () => {
+      if (!userWantsPlay || !ready) return;
+      if (player.getPlayerState() !== YT.PlayerState.PLAYING) {
+        player.playVideo();
+        if (++attempts < 8) resumeTimer = setTimeout(tryPlay, 500 * attempts);
+      }
+    };
+    resumeTimer = setTimeout(tryPlay, 150);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && userWantsPlay && $('keepAlive').checked) { startKeepAlive(); scheduleResume(); }
+    if (!document.hidden) {
+      setStatus(userWantsPlay ? 'Đang phát nền ✓' : '', userWantsPlay);
+      if (userWantsPlay && ready && player.getPlayerState() !== YT.PlayerState.PLAYING) player.playVideo();
+    }
+  });
+  window.addEventListener('pagehide', () => { if (userWantsPlay) scheduleResume(); });
+
+  // 3) Media Session: điều khiển trên màn hình khoá / thanh thông báo / tai nghe.
+  function updateMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    const cur = queue[idx];
+    if (!cur) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: cur.title || 'YouTube',
+      artist: cur.author || 'YT Nền',
+      artwork: [
+        { src: `https://i.ytimg.com/vi/${cur.id}/mqdefault.jpg`, sizes: '320x180', type: 'image/jpeg' },
+        { src: `https://i.ytimg.com/vi/${cur.id}/hqdefault.jpg`, sizes: '480x360', type: 'image/jpeg' },
+      ],
+    });
+  }
+  if ('mediaSession' in navigator) {
+    const ms = navigator.mediaSession;
+    const set = (a, f) => { try { ms.setActionHandler(a, f); } catch {} };
+    set('play', () => { userWantsPlay = true; startKeepAlive(); ready && player.playVideo(); });
+    set('pause', () => { userWantsPlay = false; ready && player.pauseVideo(); stopKeepAlive(); });
+    set('nexttrack', () => next());
+    set('previoustrack', prev);
+    set('seekbackward', (d) => ready && player.seekTo(Math.max(0, player.getCurrentTime() - (d.seekOffset || 10)), true));
+    set('seekforward', (d) => ready && player.seekTo(player.getCurrentTime() + (d.seekOffset || 10), true));
+    set('seekto', (d) => ready && player.seekTo(d.seekTime, true));
+  }
+
+  // 4) Giữ đồng bộ trạng thái im lặng / thanh tiến trình
+  setInterval(() => {
+    if (!ready || !userWantsPlay) return;
+    try {
+      const dur = player.getDuration(), pos = player.getCurrentTime();
+      if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && dur > 0) {
+        navigator.mediaSession.setPositionState({ duration: dur, position: Math.min(pos, dur), playbackRate: 1 });
+      }
+    } catch {}
+  }, 2000);
+
+  function setStatus(msg, ok) { const s = $('status'); s.textContent = msg; s.classList.toggle('on', !!ok); }
+
+  // ---------- Share target / ?v= ----------
+  const qp = new URLSearchParams(location.search);
+  const shared = qp.get('v') || qp.get('url') || qp.get('text');
+  if (shared) {
+    const p = parse(shared.match(/https?:\/\/\S+/)?.[0] || shared);
+    if (p && p.video && !queue.some((q) => q.id === p.video)) { queue.push({ id: p.video }); idx = queue.length - 1; save(); }
+    history.replaceState(null, '', location.pathname);
+  }
+
+  applyOpts();
+  render();
+
+  const tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+</script>
+</body>
+</html>
