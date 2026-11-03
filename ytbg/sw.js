@@ -1,5 +1,5 @@
 // Service worker tối giản: cache vỏ app để mở nhanh / cài được như PWA.
-const CACHE = 'ytbg-v3';
+const CACHE = 'ytbg-v4';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (e) => {
