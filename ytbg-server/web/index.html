@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>YT Nền</title>
+<meta name="theme-color" content="#0f0f0f">
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!-- Đăng nhập -->
+<section id="login" class="login" hidden>
+  <form id="loginForm" class="login-card" autocomplete="on">
+    <div class="logo big">▶ YT <span>Nền</span></div>
+    <p class="muted">Trang cá nhân — đăng nhập bằng tài khoản admin cấp cho bạn.</p>
+    <input id="lUser" name="username" autocomplete="username" placeholder="Tên đăng nhập" required autocapitalize="none" spellcheck="false">
+    <input id="lPass" name="password" type="password" autocomplete="current-password" placeholder="Mật khẩu" required>
+    <button class="btn primary" type="submit" id="lBtn">Đăng nhập</button>
+    <div id="lErr" class="err"></div>
+  </form>
+</section>
+
+<!-- Ứng dụng -->
+<div id="app" hidden>
+  <header class="top">
+    <a href="#/" class="logo">▶ YT <span>Nền</span></a>
+    <span id="offBadge" class="badge" hidden>Offline</span>
+    <a href="#/search" class="icon-btn" aria-label="Tìm kiếm">🔍</a>
+  </header>
+  <main id="view"></main>
+
+  <div id="mini" class="mini" hidden>
+    <div class="mini-progress"><div id="miniBar"></div></div>
+    <img id="miniImg" alt="">
+    <div class="mini-text"><div id="miniTitle" class="ell"></div><div id="miniSub" class="ell muted"></div></div>
+    <button id="miniPlay" class="icon-btn" aria-label="Phát/Dừng">▶</button>
+    <button id="miniNext" class="icon-btn" aria-label="Bài tiếp">⏭</button>
+  </div>
+
+  <nav class="tabs">
+    <a href="#/" data-tab="home"><span>🏠</span>Trang chủ</a>
+    <a href="#/search" data-tab="search"><span>🔍</span>Tìm kiếm</a>
+    <a href="#/library" data-tab="library"><span>📚</span>Thư viện</a>
+    <a href="#/admin" data-tab="admin" id="tabAdmin" hidden><span>🛠</span>Quản trị</a>
+  </nav>
+</div>
+
+<!-- Trình phát toàn màn hình -->
+<section id="player" class="player" hidden>
+  <div class="player-top">
+    <button id="pClose" class="icon-btn" aria-label="Thu nhỏ">⌄</button>
+    <span class="muted" id="pFrom"></span>
+    <button id="pQueueBtn" class="icon-btn" aria-label="Danh sách chờ">☰</button>
+  </div>
+  <img id="pImg" class="p-cover" alt="">
+  <div class="p-meta">
+    <div id="pTitle" class="p-title"></div>
+    <div id="pSub" class="muted"></div>
+    <div id="pSrc" class="p-src"></div>
+  </div>
+  <div class="seek">
+    <span id="tCur">0:00</span><input type="range" id="seek" min="0" max="1000" value="0" aria-label="Tua"><span id="tDur">0:00</span>
+  </div>
+  <div class="p-ctl">
+    <button id="pShuffle" class="icon-btn" aria-label="Trộn bài">🔀</button>
+    <button id="pPrev" class="icon-btn big" aria-label="Bài trước">⏮</button>
+    <button id="pPlay" class="icon-btn play" aria-label="Phát/Dừng">▶</button>
+    <button id="pNext" class="icon-btn big" aria-label="Bài tiếp">⏭</button>
+    <button id="pRepeat" class="icon-btn" aria-label="Lặp">🔁</button>
+  </div>
+  <div class="p-actions">
+    <button id="pAdd" class="btn">＋ Playlist</button>
+    <button id="pVideo" class="btn">▶ Xem video</button>
+  </div>
+  <div id="pQueue" class="p-queue" hidden></div>
+</section>
+
+<!-- Bảng chọn (thêm vào playlist, menu…) -->
+<div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheetBody"></div></div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
