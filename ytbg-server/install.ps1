@@ -10,7 +10,7 @@
             Bỏ trống nếu bạn tự lo HTTPS (Cloudflare Tunnel, IIS…).
   -Port     Cổng nội bộ của máy chủ Python (mặc định 8080).
 
-  Chạy lại script bất cứ lúc nào để cập nhật / sửa cài đặt — không mất khoá bí mật.
+  Chạy lại script bất cứ lúc nào để cập nhật / sửa cài đặt — không mất tài khoản, playlist (thư mục data\).
 #>
 param(
     [string]$Domain = "",
@@ -61,14 +61,25 @@ Remove-Item $zip -Force
 # ------------------------------------------------------------------ 4. Cấu hình
 Step 'Cấu hình (config.json)'
 Push-Location $Dir
-& $venvPy -c "import server" | Out-Null       # tạo config.json + khoá bí mật nếu chưa có
+& $venvPy -c "import server" | Out-Null       # tạo config.json nếu chưa có
 Pop-Location
 $cfgPath = Join-Path $Dir 'config.json'
 $cfg = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $cfg.host = '127.0.0.1'
 $cfg.port = $Port
-$cfg.public_url = $(if ($Domain) { "https://$Domain" } else { '' })
 $cfg | ConvertTo-Json | Set-Content $cfgPath -Encoding UTF8
+
+# ------------------------------------------------------------------ 4b. Tài khoản admin
+if (-not (Test-Path (Join-Path $Dir 'data\users.json'))) {
+    Step 'Tạo tài khoản admin (dùng để đăng nhập web và cấp tài khoản cho người khác)'
+    do { $admin = (Read-Host 'Tên đăng nhập admin (a-z, 0-9, . _ -)').Trim().ToLower() } until ($admin -match '^[a-z0-9_.-]{3,32}$')
+    Push-Location $Dir
+    & $venvPy server.py adduser $admin --admin
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) { throw 'Tạo tài khoản admin thất bại' }
+} else {
+    Write-Host 'Đã có tài khoản (data\users.json) — giữ nguyên.'
+}
 
 # ------------------------------------------------------------------ 5. Chạy nền khi khởi động
 function Register-Bg($name, $exe, $arguments) {
@@ -117,22 +128,21 @@ $Domain {
 
 # ------------------------------------------------------------------ 7. Kiểm tra
 Step 'Kiểm tra máy chủ'
-$key = (Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json).key
 $ok = $false
 for ($i = 0; $i -lt 20 -and -not $ok; $i++) {
     Start-Sleep -Seconds 2
-    try { $r = Invoke-RestMethod "http://127.0.0.1:$Port/$key/"; $ok = $r.ok } catch {}
+    try { $r = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$Port/"; $ok = $r.StatusCode -eq 200 } catch {}
 }
-if ($ok) { Write-Host "Máy chủ Python chạy OK (yt-dlp $($r.yt_dlp))" -ForegroundColor Green }
+if ($ok) { Write-Host 'Máy chủ chạy OK' -ForegroundColor Green }
 else { Write-Host "Máy chủ chưa phản hồi — xem log: $Logs\server.log" -ForegroundColor Yellow }
 
 Write-Host ''
 if ($Domain) {
-    Write-Host 'Dán địa chỉ sau vào trang YT Nền → Cài đặt tìm kiếm → Máy chủ riêng:' -ForegroundColor Green
-    Write-Host "    https://$Domain/$key" -ForegroundColor White
+    Write-Host "Mở trên điện thoại / máy tính:  https://$Domain" -ForegroundColor Green
+    Write-Host 'Đăng nhập bằng tài khoản admin, vào tab "Quản trị" để cấp tài khoản cho người khác.'
     Write-Host '(Lần đầu Caddy cần ~1 phút để xin chứng chỉ HTTPS. Nhớ mở cổng 80 và 443 ở tường lửa của nhà cung cấp VPS.)'
 } else {
-    Write-Host "Máy chủ đang chạy tại http://127.0.0.1:$Port/$key (chỉ trong VPS)." -ForegroundColor Yellow
-    Write-Host 'Bạn cần HTTPS để trang web dùng được — chạy lại với -Domain <tên miền>, hoặc xem README phần Cloudflare Tunnel.'
+    Write-Host "Máy chủ đang chạy tại http://127.0.0.1:$Port (chỉ trong VPS)." -ForegroundColor Yellow
+    Write-Host 'Bạn cần HTTPS — chạy lại với -Domain <tên miền>.'
 }
-Write-Host "Khoá bí mật lưu trong: $cfgPath — đừng chia sẻ địa chỉ có khoá cho người khác."
+Write-Host "Dữ liệu (tài khoản, playlist) nằm trong $Dir\data — nên sao lưu định kỳ."
