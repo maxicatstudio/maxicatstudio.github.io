@@ -91,16 +91,30 @@
     audio.pause(); userWantsPlay = false;
     showLogin('Phiên đăng nhập đã hết — vui lòng đăng nhập lại.');
   }
+  async function doLogin(username, password) {
+    const m = await api('/login', { method: 'POST', body: { username, password } });
+    if (LS.get('lastUser', null) !== m.user) { LS.del('playlists'); LS.del('queue'); LS.del('pos'); }
+    LS.set('lastUser', m.user);
+    me = m; LS.set('me', m);
+    $('#lPass').value = '';
+    if (started) location.reload(); else start();
+  }
+  // Đăng nhập nhanh bằng liên kết: /?tk=<tên>&mk=<mật khẩu> (nhận cả dạng "?tk=<tên> mk=<mật khẩu>").
+  // Xoá ngay khỏi thanh địa chỉ để mật khẩu không nằm lại trong lịch sử trình duyệt.
+  function takeQuickLogin() {
+    const q = new URLSearchParams(location.search);
+    if (!q.has('tk') && !q.has('mk')) return null;
+    let tk = q.get('tk') || '', mk = q.get('mk') || '';
+    const joined = !mk && tk.match(/^(\S+)\s+mk=(.*)$/);
+    if (joined) { tk = joined[1]; mk = joined[2]; }
+    history.replaceState(null, '', location.pathname + location.hash);
+    return tk && mk ? { tk, mk } : null;
+  }
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     $('#lBtn').disabled = true; $('#lErr').textContent = '';
     try {
-      const m = await api('/login', { method: 'POST', body: { username: $('#lUser').value, password: $('#lPass').value } });
-      if (LS.get('lastUser', null) !== m.user) { LS.del('playlists'); LS.del('queue'); LS.del('pos'); }
-      LS.set('lastUser', m.user);
-      me = m; LS.set('me', m);
-      $('#lPass').value = '';
-      if (started) location.reload(); else start();
+      await doLogin($('#lUser').value, $('#lPass').value);
     } catch (err) { $('#lErr').textContent = err.message; }
     finally { $('#lBtn').disabled = false; }
   };
@@ -113,12 +127,19 @@
   }
 
   async function boot() {
+    const quick = takeQuickLogin();
+    let quickErr = '';
+    if (quick) {
+      try { await doLogin(quick.tk, quick.mk); return; }
+      catch (err) { quickErr = err.message; }
+    }
     try {
       me = await api('/me');
       LS.set('me', me); LS.set('lastUser', me.user);
       start();
+      if (quickErr) toast('Liên kết đăng nhập không dùng được: ' + quickErr, 4000);
     } catch (e) {
-      if (e.status === 401) showLogin();
+      if (e.status === 401) showLogin(quickErr);
       else if (me) { start(); toast('Không kết nối được máy chủ — chỉ nghe được bài đã tải.', 4000); }
       else showLogin('Không kết nối được máy chủ. Kiểm tra mạng rồi tải lại trang.');
     }
