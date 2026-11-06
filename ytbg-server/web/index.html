@@ -34,6 +34,18 @@
     <span id="offBadge" class="badge" hidden>Offline</span>
     <a href="#/search" class="icon-btn" aria-label="Tìm kiếm">🔍</a>
   </header>
+  <div id="vdock" class="vdock" hidden>
+    <div class="vbox">
+      <video id="vid" playsinline webkit-playsinline controls preload="auto" x-webkit-airplay="allow"></video>
+      <div id="ytbox" hidden></div>
+    </div>
+    <div class="vtools">
+      <span id="vStatus" class="muted ell"></span>
+      <button id="vPip" class="btn sm" hidden>⧉ Cửa sổ nổi</button>
+      <button id="vQ" class="btn sm" hidden>⚙</button>
+      <button id="vMode" class="btn sm">▶ Trình phát YouTube</button>
+    </div>
+  </div>
   <main id="view"></main>
 
   <div id="mini" class="mini" hidden>

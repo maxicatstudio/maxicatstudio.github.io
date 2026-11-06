@@ -18,11 +18,12 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import time
 from pathlib import Path
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 import yt_dlp
 
 HERE = Path(__file__).resolve().parent
@@ -31,12 +32,15 @@ DATA = HERE / "data"
 CONFIG_PATH = HERE / "config.json"
 USERS_PATH = DATA / "users.json"
 SESS_PATH = DATA / "sessions.json"
+HLS_DIR = HERE / "cache" / "hls"
 
 ID_RE = re.compile(r"^[\w-]{11}$")
 FMT_RE = re.compile(r"^[\w-]{1,16}$")
 CHAN_RE = re.compile(r"^(UC[\w-]{22}|@[\w.\-]{2,60})$")
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
 PID_RE = re.compile(r"^[\w-]{4,16}$")
+SEG_RE = re.compile(r"^(init\.mp4|seg\d{5}\.m4s)$")
+QUALITIES = (360, 480, 720, 1080)
 
 COOKIE = "ytbg_s"
 SESSION_DAYS = 90
@@ -48,7 +52,13 @@ MAX_PLAYLISTS = 200
 MAX_ITEMS = 3000
 DEFAULT_TOPICS = ["Nhạc mới nhất", "Nhạc trẻ hot", "Lofi chill", "Nhạc Bolero"]
 
-os.environ["PATH"] = str(HERE / "bin") + os.pathsep + os.environ.get("PATH", "")  # deno.exe cho yt-dlp
+os.environ["PATH"] = str(HERE / "bin") + os.pathsep + os.environ.get("PATH", "")  # deno.exe, ffmpeg.exe
+FFMPEG = shutil.which("ffmpeg")
+INTERNAL = secrets.token_urlsafe(18)  # khoá cho ffmpeg đọc luồng qua chính máy chủ này (chỉ từ 127.0.0.1)
+MEDIA_TTL = 12 * 3600
+HLS_KEEP = 12 * 3600       # giữ video đã ghép 12 giờ
+HLS_IDLE = 10 * 60         # dừng ghép nếu 10 phút không ai xem
+HLS_MAX_JOBS = 4
 
 
 def log(*a):
@@ -74,7 +84,8 @@ def write_json(p, obj):
 def load_config():
     cfg = read_json(CONFIG_PATH, {})
     changed = False
-    for k, v in {"host": "127.0.0.1", "port": 8080, "cookies": "cookies.txt"}.items():
+    for k, v in {"host": "127.0.0.1", "port": 8080, "cookies": "cookies.txt",
+                 "secret": secrets.token_hex(32), "video_cache_gb": 5}.items():
         if k not in cfg:
             cfg[k] = v
             changed = True
@@ -266,6 +277,19 @@ def extract_video(video_id):
         })
     if any((f["lang_pref"] or 0) >= 10 for f in fmts):  # bỏ bản lồng tiếng
         fmts = [f for f in fmts if (f["lang_pref"] or 0) >= 10]
+    # Video H.264 (iPhone phát được): bản chỉ-hình (ghép với tiếng bằng ffmpeg) và bản đã ghép sẵn (360p)
+    vids = []
+    for f in info.get("formats") or []:
+        vc, ac = f.get("vcodec") or "none", f.get("acodec") or "none"
+        if not vc.startswith("avc1") or f.get("protocol") not in ("https", "http") or not f.get("url"):
+            continue
+        m = re.match(r"(\d{3,4})p", f.get("format_note") or "")
+        q = int(m.group(1)) if m else (f.get("height") or 0)
+        vids.append({
+            "id": str(f["format_id"]), "url": f["url"], "headers": f.get("http_headers") or {},
+            "mime": "video/mp4", "ext": "mp4", "q": q, "kind": "v" if ac == "none" else "muxed",
+            "size": f.get("filesize") or None, "bitrate": int((f.get("tbr") or 0) * 1000),
+        })
     cid = info.get("channel_id") or ""
     return {
         "id": video_id,
@@ -276,7 +300,9 @@ def extract_video(video_id):
         "views": info.get("view_count"),
         "uploadDate": info.get("upload_date"),
         "description": (info.get("description") or "")[:5000],
+        "live": info.get("live_status") in ("is_live", "is_upcoming"),
         "formats": fmts,
+        "video": vids,
     }
 
 
@@ -336,6 +362,30 @@ async def channel(cid, page):
             "nextpage": page + 1 if len(r["items"]) >= n and page < 10 else None}
 
 
+# ================================================================ link media có chữ ký
+# <audio>/<video>/HLS không phải lúc nào cũng gửi cookie (nhất là trên iPhone), nên link media
+# mang theo chữ ký riêng: /m/<hết hạn>/<user>/<chữ ký>/...  (hết hạn sau 12 giờ)
+def media_sig(user, vid, exp):
+    return hmac.new(CFG["secret"].encode(), f"{exp}.{user}.{vid}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def media_prefix(user, vid):
+    exp = (int(time.time()) // 3600 + 1) * 3600 + MEDIA_TTL  # làm tròn theo giờ -> link ổn định
+    return f"/m/{exp}/{user}/{media_sig(user, vid, exp)}"
+
+
+def check_media(request):
+    mi = request.match_info
+    try:
+        exp = int(mi["exp"])
+    except ValueError:
+        raise web.HTTPForbidden()
+    u, vid = mi["user"], mi["vid"]
+    if (exp < time.time() or not USER_RE.match(u) or u not in users() or not ID_RE.match(vid)
+            or not hmac.compare_digest(mi["sig"], media_sig(u, vid, exp))):
+        raise web.HTTPForbidden(text="Link hết hạn — tải lại trang")
+
+
 # ================================================================ HTTP: tiện ích
 def is_https(request):
     return request.headers.get("X-Forwarded-Proto", request.scheme) == "https"
@@ -367,9 +417,12 @@ def need_admin(request):
 @web.middleware
 async def mw(request, handler):
     path = request.path
-    if path.startswith("/api/"):
+    if path.startswith("/internal/"):
+        if request.remote not in ("127.0.0.1", "::1") or request.match_info.get("secret") != INTERNAL:
+            raise web.HTTPForbidden()
+    elif path.startswith("/api/"):
         # chống CSRF: mọi request API phải có header riêng (trang khác không gửi được nếu không qua CORS)
-        if request.headers.get("X-YTBG") != "1" and not path.startswith(("/api/audio/", "/api/thumb/")):
+        if request.headers.get("X-YTBG") != "1" and not path.startswith("/api/thumb/"):
             return err(403, "Thiếu header")
         if path != "/api/login":
             u = session_user(request.cookies.get(COOKIE))
@@ -520,9 +573,10 @@ async def h_channel(request):
     return web.json_response(await channel(cid, page_of(request, 10)))
 
 
-def public_info(info):
-    out = {k: v for k, v in info.items() if k != "formats"}
-    out["audio"] = [{"url": f"/api/audio/{info['id']}/{f['id']}", "mime": f["mime"], "ext": f["ext"],
+def public_info(info, user):
+    out = {k: v for k, v in info.items() if k not in ("formats", "video")}
+    pre = media_prefix(user, info["id"])
+    out["audio"] = [{"url": f"{pre}/a/{info['id']}/{f['id']}", "mime": f["mime"], "ext": f["ext"],
                      "codec": f["codec"], "bitrate": f["bitrate"]} for f in info["formats"]]
     return out
 
@@ -531,7 +585,7 @@ async def h_video(request):
     vid = request.match_info["vid"]
     if not ID_RE.match(vid):
         raise web.HTTPBadRequest(text="ID video không hợp lệ")
-    return web.json_response(public_info(await get_info(vid)))
+    return web.json_response(public_info(await get_info(vid), request["user"]))
 
 
 def title_query(t):
@@ -727,11 +781,21 @@ async def upstream_size(sess, f):
 
 async def find_format(vid, fid, force=False):
     info = await get_info(vid, force=force)
-    return next((f for f in info["formats"] if f["id"] == fid), None)
+    return next((f for f in info["formats"] + info["video"] if f["id"] == fid), None)
 
 
-async def h_audio(request):
-    vid, fid = request.match_info["vid"], request.match_info["fid"]
+async def h_media(request):
+    """Link có chữ ký: /m/.../a/<vid>/<fmt> (âm thanh) hoặc /v/ (video ghép sẵn)."""
+    check_media(request)
+    return await proxy_format(request, request.match_info["vid"], request.match_info["fid"])
+
+
+async def h_internal(request):
+    return await proxy_format(request, request.match_info["vid"], request.match_info["fid"])
+
+
+async def proxy_format(request, vid, fid):
+    """Chuyển tiếp một định dạng của YouTube (hỗ trợ Range/tua), tải từ YouTube theo khúc."""
     if not ID_RE.match(vid) or not FMT_RE.match(fid):
         raise web.HTTPBadRequest()
     sess = request.app["sess"]
@@ -782,8 +846,10 @@ async def h_audio(request):
                     pos += len(data)
                     if pos > stop:
                         break
-    except (ConnectionResetError, asyncio.CancelledError):
-        pass  # người nghe tua / chuyển bài
+    except (ConnectionError, asyncio.CancelledError):
+        pass  # người xem tua / chuyển bài -> trình duyệt tự ngắt
+    except (ClientError, asyncio.TimeoutError) as e:
+        log(f"upstream {vid}/{fid} đứt giữa chừng: {e!r}")
     return resp
 
 
@@ -798,6 +864,209 @@ async def h_thumb(request):
     return web.Response(body=body, content_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
+# ================================================================ video: ghép 720p/1080p thành HLS bằng ffmpeg
+# YouTube chỉ có sẵn bản ghép hình+tiếng ở 360p. Từ 480p trở lên hình và tiếng là hai luồng riêng,
+# nên máy chủ dùng ffmpeg ghép lại (chỉ chép dữ liệu, không mã hoá lại -> rất nhẹ CPU) thành HLS,
+# định dạng iPhone phát sẵn và dùng được "Hình trong hình". Video phát được sau vài giây
+# trong lúc ffmpeg vẫn đang ghép phần sau.
+_jobs = {}  # "vid_q" -> {"state": running|done|error, "proc", "last", "err"}
+
+
+def video_choices(info):
+    vs = [f for f in info["video"] if f["kind"] == "v" and f["q"] in QUALITIES]
+    return sorted({f["q"] for f in vs}), vs
+
+
+def pick_quality(qualities, want):
+    lower = [q for q in qualities if q <= want]
+    return max(lower) if lower else min(qualities)
+
+
+def hls_ready(d):
+    p = d / "index.m3u8"
+    try:
+        return p.read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError):
+        return None
+
+
+_hls_locks = {}
+
+
+async def ensure_hls(vid, q, info=None):
+    key = f"{vid}_{q}"
+    job = _jobs.get(key)
+    if job and job["state"] in ("running", "done"):  # đường nhanh, không cần khoá
+        job["last"] = time.time()
+        return job
+    async with _hls_locks.setdefault(key, asyncio.Lock()):
+        return await _ensure_hls(vid, q, key, info)
+
+
+async def _ensure_hls(vid, q, key, info):
+    d = HLS_DIR / key
+    job = _jobs.get(key)
+    if job and job["state"] in ("running", "done"):
+        job["last"] = time.time()
+        return job
+    txt = hls_ready(d)
+    if txt and "#EXT-X-ENDLIST" in txt:  # đã ghép xong từ trước
+        job = _jobs[key] = {"state": "done", "last": time.time(), "err": ""}
+        return job
+    info = info or await get_info(vid)
+    vf = next((f for f in sorted(info["video"], key=lambda f: -f["bitrate"]) if f["kind"] == "v" and f["q"] == q), None)
+    auds = sorted(info["formats"], key=lambda f: (f["mime"] != "audio/mp4", -f["bitrate"]))
+    if not vf or not auds:
+        raise web.HTTPBadGateway(text="Không có định dạng video phù hợp")
+    af = auds[0]
+    running = sorted((j["last"], k) for k, j in _jobs.items() if j["state"] == "running")
+    while len(running) >= HLS_MAX_JOBS:  # quá nhiều việc ghép cùng lúc -> dừng việc lâu không ai xem nhất
+        stop_job(running.pop(0)[1])
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True, exist_ok=True)
+    base = f"http://127.0.0.1:{int(CFG['port'])}/internal/{INTERNAL}/{vid}"
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+           "-i", f"{base}/{vf['id']}", "-i", f"{base}/{af['id']}",
+           "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+           "-c:a", "copy" if af["mime"] == "audio/mp4" else "aac", *([] if af["mime"] == "audio/mp4" else ["-b:a", "160k"]),
+           "-f", "hls", "-hls_time", "4", "-hls_list_size", "0", "-hls_playlist_type", "event",
+           "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
+           "-hls_flags", "independent_segments+temp_file", "-start_number", "0",
+           "-hls_segment_filename", "seg%05d.m4s", "index.m3u8"]
+    proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(d), stdin=asyncio.subprocess.DEVNULL,
+                                                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    job = _jobs[key] = {"state": "running", "proc": proc, "last": time.time(), "err": "", "t0": time.time()}
+    log(f"ghép video {key} (hình {vf['id']} + tiếng {af['id']})")
+    asyncio.get_running_loop().create_task(watch_job(key, job, d))
+    return job
+
+
+async def watch_job(key, job, d):
+    err = (await job["proc"].stderr.read()).decode("utf-8", "replace").strip()
+    rc = await job["proc"].wait()
+    if job["state"] != "running":
+        return  # đã bị dừng
+    if rc == 0:
+        job["state"] = "done"
+        log(f"ghép xong {key} ({time.time() - job['t0']:.0f}s)")
+    else:
+        job["state"], job["err"] = "error", (err[-300:] or f"ffmpeg lỗi {rc}")
+        log(f"ghép lỗi {key}: {job['err']}")
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def stop_job(key):
+    job = _jobs.pop(key, None)
+    if job and job["state"] == "running":
+        job["state"] = "stopped"
+        try:
+            job["proc"].kill()
+        except ProcessLookupError:
+            pass
+        shutil.rmtree(HLS_DIR / key, ignore_errors=True)
+        log(f"dừng ghép {key} (không ai xem)")
+
+
+def dir_size(d):
+    return sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+
+
+async def janitor():
+    """Dừng việc ghép không ai xem, xoá video cũ, giữ bộ nhớ đệm dưới giới hạn."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = time.time()
+            for k, j in list(_jobs.items()):
+                if j["state"] == "running" and now - j["last"] > HLS_IDLE:
+                    stop_job(k)
+                elif j["state"] in ("done", "error") and now - j["last"] > HLS_KEEP:
+                    _jobs.pop(k, None)
+            if not HLS_DIR.exists():
+                continue
+            dirs = []
+            for d in HLS_DIR.iterdir():
+                if not d.is_dir():
+                    continue
+                j = _jobs.get(d.name)
+                if j and j["state"] == "running":
+                    continue
+                last = j["last"] if j else d.stat().st_mtime
+                if now - last > HLS_KEEP:
+                    shutil.rmtree(d, ignore_errors=True)
+                else:
+                    dirs.append((last, d, dir_size(d)))
+            limit = float(CFG.get("video_cache_gb") or 5) * 1024 ** 3
+            total = sum(x[2] for x in dirs)
+            for last, d, size in sorted(dirs, key=lambda x: x[0]):
+                if total <= limit:
+                    break
+                shutil.rmtree(d, ignore_errors=True)
+                _jobs.pop(d.name, None)
+                total -= size
+        except Exception as e:  # không để dọn dẹp làm sập máy chủ
+            log("janitor:", e)
+
+
+async def h_play(request):
+    """Trang xem hỏi cách phát video: HLS (ghép), mp4 360p có sẵn, hoặc trình phát YouTube."""
+    vid = request.match_info["vid"]
+    if not ID_RE.match(vid):
+        raise web.HTTPBadRequest()
+    try:
+        want = int(request.query.get("q", "720"))
+    except ValueError:
+        want = 720
+    info = await get_info(vid)
+    if info.get("live"):
+        return web.json_response({"type": "yt", "reason": "Video trực tiếp — dùng trình phát YouTube"})
+    pre = media_prefix(request["user"], vid)
+    split, _ = video_choices(info)                      # chất lượng cần ghép (hình + tiếng riêng)
+    if not FFMPEG or not info["formats"]:
+        split = []
+    mux = max((f for f in info["video"] if f["kind"] == "muxed"), key=lambda f: f["q"], default=None)
+    quals = sorted(set(split) | ({mux["q"]} if mux else set()))
+    if not quals:
+        return web.json_response({"type": "yt", "reason": "Không có định dạng phát trực tiếp"})
+    q = pick_quality(quals, want)
+    note = "" if FFMPEG else "Máy chủ chưa có ffmpeg — chỉ phát được 360p"
+    if mux and (q == mux["q"] or q not in split):  # bản ghép sẵn (360p) -> khỏi cần ffmpeg
+        return web.json_response({"type": "mp4", "url": f"{pre}/v/{vid}/{mux['id']}", "q": mux["q"], "qualities": quals, "note": note})
+    await ensure_hls(vid, q, info)
+    return web.json_response({"type": "hls", "url": f"{pre}/hls/{vid}/{q}/index.m3u8", "q": q, "qualities": quals})
+
+
+async def h_hls(request):
+    check_media(request)
+    vid, name = request.match_info["vid"], request.match_info["name"]
+    try:
+        q = int(request.match_info["q"])
+    except ValueError:
+        raise web.HTTPBadRequest()
+    if q not in QUALITIES or not (name == "index.m3u8" or SEG_RE.match(name)):
+        raise web.HTTPNotFound()
+    if not FFMPEG:
+        raise web.HTTPServiceUnavailable(text="Máy chủ chưa có ffmpeg")
+    job = await ensure_hls(vid, q)
+    d = HLS_DIR / f"{vid}_{q}"
+    deadline = time.time() + (40 if name == "index.m3u8" else 20)
+    while True:  # chờ ffmpeg ghép xong đoạn đầu / đoạn được yêu cầu
+        if job["state"] == "error":
+            raise web.HTTPBadGateway(text="Ghép video lỗi: " + job["err"][:200])
+        if name == "index.m3u8":
+            txt = hls_ready(d)
+            if txt and "#EXTINF" in txt:
+                return web.Response(text=txt, content_type="application/vnd.apple.mpegurl",
+                                    headers={"Cache-Control": "no-cache"})
+        elif (d / name).is_file():
+            return web.FileResponse(d / name, headers={"Content-Type": "video/mp4", "Cache-Control": "private, max-age=3600"})
+        if time.time() > deadline:
+            raise web.HTTPGatewayTimeout(text="Máy chủ ghép video quá lâu")
+        if job["state"] not in ("running", "done"):
+            job = await ensure_hls(vid, q)
+        await asyncio.sleep(0.3)
+
+
 # ================================================================ giao diện web
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -806,6 +1075,7 @@ STATIC = {
     "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icon.svg": ("icon.svg", "image/svg+xml"),
+    "/vendor/hls.min.js": ("vendor/hls.min.js", "text/javascript; charset=utf-8"),
 }
 
 
@@ -817,9 +1087,15 @@ async def h_static(request):
 
 async def on_startup(app):
     app["sess"] = ClientSession(timeout=ClientTimeout(total=None, sock_connect=15, sock_read=30))
+    app["janitor"] = asyncio.get_running_loop().create_task(janitor())
+    if not FFMPEG:
+        log("Không tìm thấy ffmpeg — video chỉ phát được 360p (chạy lại install.ps1 để cài)")
 
 
 async def on_cleanup(app):
+    app["janitor"].cancel()
+    for k in [k for k, j in _jobs.items() if j["state"] == "running"]:
+        stop_job(k)
     await app["sess"].close()
 
 
@@ -853,7 +1129,11 @@ def make_app():
     r.add_delete("/api/playlists/{pid}", h_pl_delete)
     r.add_post("/api/playlists/{pid}/items", h_pl_add)
     r.add_delete("/api/playlists/{pid}/items/{vid}", h_pl_remove)
-    r.add_get("/api/audio/{vid}/{fid}", h_audio)
+    r.add_get("/api/play/{vid}", h_play)
+    r.add_get("/m/{exp}/{user}/{sig}/a/{vid}/{fid}", h_media)
+    r.add_get("/m/{exp}/{user}/{sig}/v/{vid}/{fid}", h_media)
+    r.add_get("/m/{exp}/{user}/{sig}/hls/{vid}/{q}/{name}", h_hls)
+    r.add_get("/internal/{secret}/{vid}/{fid}", h_internal)
     r.add_get("/api/thumb/{vid}", h_thumb)
     return app
 

@@ -8,8 +8,9 @@ Ai không có tài khoản thì chỉ thấy màn hình đăng nhập.
 
 1. **Xem.** Dùng như app YouTube:
    - trang chủ gồm video mới từ các kênh bạn hay xem, chủ đề bạn chọn, và lịch sử xem;
-   - tìm kiếm, trang kênh;
-   - trang xem video bằng trình phát YouTube, kèm video liên quan;
+   - tìm kiếm, trang kênh, video liên quan;
+   - **trình phát riêng không quảng cáo**, mặc định **720p** (chọn được 360p, 480p, 720p, 1080p);
+   - nút **⧉ Cửa sổ nổi** (Hình trong hình) để xem tiếp khi chuyển sang app khác trên iPhone/Android;
    - nút **🎧 Nghe nền** để chỉ phát âm thanh, kể cả khi tắt màn hình.
 2. **Thư viện.** Hồ sơ riêng của từng tài khoản:
    - tạo nhiều playlist, đổi tên, sắp xếp, trộn bài, lặp;
@@ -52,6 +53,32 @@ Bản cũ có trang chạy trên `maxicatstudio.github.io/ytbg/`. Bản mới ch
 3. Mở `https://tenmien.cua.ban`. Địa chỉ cũ có `/<khoá>` không dùng nữa.
 
 Từ lần sau, chỉ cần chạy `.\update.ps1 -Code` để lấy bản mới nhất.
+
+> **Nâng cấp lên bản có video 720p:** chạy `.\update.ps1 -Code`, **rồi chạy lại** `.\install.ps1 -Domain tenmien.cua.ban`
+> để cài thêm ffmpeg (bản `update.ps1` cũ chưa biết cài ffmpeg). Tài khoản và playlist được giữ nguyên.
+
+## Video 720p / 1080p và cửa sổ nổi
+
+YouTube chỉ cấp sẵn bản ghép hình và tiếng ở **360p**. Từ 480p trở lên, hình và tiếng là hai luồng riêng.
+Vì vậy máy chủ dùng **ffmpeg** ghép hai luồng thành **HLS**, định dạng mà iPhone phát sẵn và dùng được
+"Hình trong hình".
+- ffmpeg chỉ chép dữ liệu, không mã hoá lại, nên gần như không tốn CPU.
+- Video phát được sau vài giây, trong lúc máy chủ vẫn ghép tiếp phần sau.
+- Video đã ghép được giữ trong `cache\hls` **12 giờ**, nên xem lại thì phát ngay.
+- Bộ nhớ đệm tối đa **5 GB**, đổi bằng `"video_cache_gb"` trong `config.json`.
+- Nếu không ai xem nữa, việc ghép dừng sau 10 phút.
+- Tối đa 4 video được ghép cùng lúc.
+- Video nào không ghép được thì phát bản 360p có sẵn. Video trực tiếp (live) thì dùng trình phát YouTube.
+
+**Băng thông VPS** tính cho mỗi người đang xem: khoảng 0,3 GB/giờ ở 360p, 0,5–1 GB/giờ ở 720p, 1–2 GB/giờ ở 1080p.
+
+**Cửa sổ nổi trên iPhone**
+- Bấm **⧉ Cửa sổ nổi**, hoặc nút có sẵn trên trình phát khi xem toàn màn hình.
+- Muốn cửa sổ nổi tự bật khi vuốt về màn hình chính lúc đang xem toàn màn hình: vào Cài đặt → Cài đặt chung → Hình trong hình → **Tự động bật**.
+- Khi khoá máy, iOS thường dừng video. Muốn nghe lúc khoá máy thì dùng **🎧 Nghe nền**.
+
+Nút **▶ Trình phát YouTube** chuyển về trình phát gốc của YouTube, dùng khi cần phụ đề.
+Trình phát gốc có thể có quảng cáo.
 
 ## Quản lý tài khoản
 
@@ -110,4 +137,6 @@ Mở lại app thì trang tự tải tiếp.
 | `data/users.json` | tài khoản (mật khẩu đã mã hoá) |
 | `data/sessions.json` | phiên đăng nhập |
 | `data/profiles/<tên>.json` | playlist, lịch sử, chủ đề của từng người |
-| `config.json` | cổng, đường dẫn cookies |
+| `config.json` | cổng, đường dẫn cookies, khoá ký link media (`secret`), giới hạn bộ nhớ đệm video |
+| `cache/hls/` | video đã ghép (tự dọn) |
+| `bin/` | deno.exe, ffmpeg.exe, caddy.exe |

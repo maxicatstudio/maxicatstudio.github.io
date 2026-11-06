@@ -1,5 +1,5 @@
 // Lưu vỏ ứng dụng để mở được khi offline. Không đụng tới /api/ (dữ liệu, âm thanh).
-const CACHE = 'ytbg-app-v1';
+const CACHE = 'ytbg-app-v2';
 const SHELL = ['/', '/app.js', '/app.css', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
