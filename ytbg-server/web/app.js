@@ -413,10 +413,22 @@
     return videoEl.currentTime || 0;
   };
 
+  // App lưu ra màn hình chính trên iOS không có cửa sổ nổi -> mở đúng video, đúng đoạn đang xem trong Safari.
+  const iosHomeApp = navigator.standalone === true
+    && (/iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+  function openInSafari() {
+    const url = `${location.origin}/#/watch/${V.id}?t=${Math.floor(videoTime())}`;
+    pauseVideo();
+    toast('Lần đầu mở trong Safari cần đăng nhập lại.', 4000);
+    location.href = 'x-safari-' + url;
+    // iOS cũ không nhận địa chỉ trên -> mở cách thường
+    setTimeout(() => { if (document.visibilityState === 'visible') window.open(url, '_blank'); }, 1000);
+  }
   function setVStatus(t) { $('#vStatus').textContent = t || ''; }
   function updateTools() {
     const own = V.type && V.type !== 'yt';
-    $('#vPip').hidden = !own || !pipSupported();
+    $('#vPip').hidden = !own || iosHomeApp || !pipSupported();
+    $('#vSafari').hidden = !own || !iosHomeApp;
     $('#vQ').hidden = !own || !(V.qualities && V.qualities.length > 1);
     $('#vQ').textContent = '⚙ ' + (V.q ? V.q + 'p' : '');
     $('#vMode').textContent = V.type === 'yt' ? '▶ Trình phát riêng' : '▶ Trình phát YouTube';
@@ -507,6 +519,7 @@
   videoEl.addEventListener('webkitpresentationmodechanged', () => setTimeout(onPipChange, 50));
 
   $('#vPip').onclick = togglePip;
+  $('#vSafari').onclick = openInSafari;
   $('#vQ').onclick = () => openSheet((b) => {
     b.append(el('<h3>Chất lượng video</h3>'));
     [...(V.qualities || [])].reverse().forEach((q) => b.append(sheetItem(q === V.q ? '●' : '○', `${q}p` + (q >= 720 ? ' HD' : ''), async () => {
