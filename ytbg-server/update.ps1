@@ -36,6 +36,22 @@ if ($Code) {
     Copy-Item (Join-Path $src 'web') (Join-Path $Dir 'web') -Recurse -Force
     Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
     & $venvPy -m pip install --disable-pip-version-check -q -U -r (Join-Path $Dir 'requirements.txt') 2>&1 | Add-Content $log
+    $Bin = Join-Path $Dir 'bin'
+    New-Item -ItemType Directory -Force -Path $Bin | Out-Null
+    # ------------------------------------------------------------------ ffmpeg (ghép video 480p–1080p)
+    $ff = Join-Path $Bin 'ffmpeg.exe'
+    if (-not (Test-Path $ff)) {
+        Write-Host 'Tải ffmpeg (~100 MB)…'
+        $fzip = Join-Path $env:TEMP 'ffmpeg.zip'
+        $ftmp = Join-Path $env:TEMP 'ffmpeg-x'
+        Remove-Item $ftmp -Recurse -Force -ErrorAction SilentlyContinue
+        Invoke-WebRequest -UseBasicParsing 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $fzip
+        Expand-Archive $fzip -DestinationPath $ftmp -Force
+        $exe = Get-ChildItem $ftmp -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+        if ($exe) { Copy-Item $exe.FullName $ff -Force } else { Write-Host 'Không tìm thấy ffmpeg.exe trong gói tải về' -ForegroundColor Yellow }
+        Remove-Item $fzip, $ftmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $ff) { & $ff -hide_banner -version | Select-Object -First 1 }
     Log 'đã cập nhật mã nguồn'
 } else {
     Log 'cập nhật yt-dlp'

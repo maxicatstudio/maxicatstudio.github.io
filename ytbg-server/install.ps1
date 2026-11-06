@@ -58,6 +58,22 @@ Expand-Archive $zip -DestinationPath $Bin -Force
 Remove-Item $zip -Force
 & (Join-Path $Bin 'deno.exe') --version | Select-Object -First 1
 
+Step 'ffmpeg (ghép hình + tiếng cho video 720p/1080p)'
+# ------------------------------------------------------------------ ffmpeg (ghép video 480p–1080p)
+$ff = Join-Path $Bin 'ffmpeg.exe'
+if (-not (Test-Path $ff)) {
+    Write-Host 'Tải ffmpeg (~100 MB)…'
+    $fzip = Join-Path $env:TEMP 'ffmpeg.zip'
+    $ftmp = Join-Path $env:TEMP 'ffmpeg-x'
+    Remove-Item $ftmp -Recurse -Force -ErrorAction SilentlyContinue
+    Invoke-WebRequest -UseBasicParsing 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $fzip
+    Expand-Archive $fzip -DestinationPath $ftmp -Force
+    $exe = Get-ChildItem $ftmp -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+    if ($exe) { Copy-Item $exe.FullName $ff -Force } else { Write-Host 'Không tìm thấy ffmpeg.exe trong gói tải về' -ForegroundColor Yellow }
+    Remove-Item $fzip, $ftmp -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path $ff) { & $ff -hide_banner -version | Select-Object -First 1 }
+
 # ------------------------------------------------------------------ 4. Cấu hình
 Step 'Cấu hình (config.json)'
 Push-Location $Dir
