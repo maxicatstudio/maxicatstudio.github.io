@@ -15,10 +15,12 @@ import getpass
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
 import shutil
+import struct
 import sys
 import time
 from pathlib import Path
@@ -289,6 +291,7 @@ def extract_video(video_id):
             "id": str(f["format_id"]), "url": f["url"], "headers": f.get("http_headers") or {},
             "mime": "video/mp4", "ext": "mp4", "q": q, "kind": "v" if ac == "none" else "muxed",
             "size": f.get("filesize") or None, "bitrate": int((f.get("tbr") or 0) * 1000),
+            "codec": vc, "w": f.get("width"), "h": f.get("height"),
         })
     cid = info.get("channel_id") or ""
     return {
@@ -864,6 +867,147 @@ async def h_thumb(request):
     return web.Response(body=body, content_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
+# ================================================================ video: phát thẳng không cần ghép
+# Bản chỉ-hình và chỉ-tiếng của YouTube là fMP4 đã chia đoạn, đầu file có mục lục (sidx) ghi vị trí từng đoạn.
+# Đọc mục lục rồi tạo playlist HLS đầy đủ ngay: tua tới đâu trình phát chỉ xin đúng đoạn đó (qua /a/ và /v/).
+# Không đọc được mục lục thì quay về cách ghép bằng ffmpeg ở dưới.
+INDEX_MAX = 4 * 1024 * 1024  # mục lục video rất dài vẫn chỉ vài trăm KB
+_mp4_index = {}
+
+
+def parse_mp4_index(data):
+    """Trả về {"init": số byte ftyp+moov, "segs": [(vị trí, cỡ, giây)...]}, số byte cần đọc thêm, hoặc None nếu không phù hợp."""
+    p, moov = 0, False
+    while p + 8 <= len(data):
+        size, typ = struct.unpack(">I4s", data[p:p + 8])
+        hdr = 8
+        if size == 1:
+            if p + 16 > len(data):
+                return p + 16
+            size, hdr = struct.unpack(">Q", data[p + 8:p + 16])[0], 16
+        if size < hdr or typ in (b"moof", b"mdat"):
+            return None  # không có mục lục trước phần dữ liệu
+        if typ == b"moov":
+            moov = True
+        if typ != b"sidx":
+            p += size
+            continue
+        if not moov:
+            return None
+        if p + size > len(data):
+            return p + size
+        x = data[p + hdr:p + size]
+        scale = struct.unpack(">I", x[8:12])[0]
+        if x[0] == 0:
+            first, q = struct.unpack(">I", x[16:20])[0], 20
+        else:
+            first, q = struct.unpack(">Q", x[20:28])[0], 28
+        count = struct.unpack(">H", x[q + 2:q + 4])[0]
+        q += 4
+        if not scale or not count or len(x) < q + 12 * count:
+            return None
+        pos, segs = p + size + first, []
+        for _ in range(count):
+            ref, dur, sap = struct.unpack(">III", x[q:q + 12])
+            q += 12
+            if ref >> 31 or not sap >> 31:  # mục lục lồng nhau / đoạn không mở đầu bằng keyframe
+                return None
+            segs.append((pos, ref & 0x7FFFFFFF, dur / scale))
+            pos += ref & 0x7FFFFFFF
+        return {"init": p, "segs": segs}
+    return p + 8
+
+
+async def load_mp4_index(sess, vid, f):
+    key = (vid, f["id"])
+    if key in _mp4_index:
+        return _mp4_index[key]
+    want = 32 * 1024
+    while want <= INDEX_MAX:
+        async with sess.get(f["url"], headers={**f["headers"], "Range": f"bytes=0-{want - 1}"}) as r:
+            if r.status not in (200, 206):
+                raise web.HTTPBadGateway(text=f"YouTube trả {r.status}")
+            data = await r.content.read(want) if r.status == 200 else await r.read()
+        res = parse_mp4_index(data)
+        if res is None or isinstance(res, dict):
+            if res:
+                if len(_mp4_index) > 500:
+                    _mp4_index.clear()
+                _mp4_index[key] = res
+            return res
+        want = max(want * 2, res + 1024)
+    return None
+
+
+def direct_formats(info, q):
+    vf = next((f for f in sorted(info["video"], key=lambda f: -f["bitrate"])
+               if f["kind"] == "v" and f["q"] == q and f.get("codec")), None)
+    af = next((f for f in sorted(info["formats"], key=lambda f: -f["bitrate"])
+               if f["mime"] == "audio/mp4" and f.get("codec")), None)
+    return (vf, af) if vf and af else None
+
+
+async def direct_indexes(sess, vid, q, info):
+    """Mục lục (hình, tiếng); link hết hạn thì lấy lại một lần. None nếu không phát thẳng được."""
+    for force in (False, True):
+        try:
+            if force:
+                info = await get_info(vid, force=True)
+            pair = direct_formats(info, q)
+            if not pair:
+                return None
+            vi, ai = await asyncio.gather(*(load_mp4_index(sess, vid, f) for f in pair))
+            return (pair[0], vi, pair[1], ai) if vi and ai else None
+        except (web.HTTPException, ClientError, asyncio.TimeoutError, struct.error) as e:
+            log(f"mục lục {vid}_{q}: {e}")
+    return None
+
+
+def media_playlist(pre, kind, vid, f, idx):
+    uri = f"{pre}/{kind}/{vid}/{f['id']}"
+    lines = ["#EXTM3U", "#EXT-X-VERSION:7", f"#EXT-X-TARGETDURATION:{math.ceil(max(s[2] for s in idx['segs']))}",
+             "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-INDEPENDENT-SEGMENTS",
+             f'#EXT-X-MAP:URI="{uri}",BYTERANGE="{idx["init"]}@0"']
+    for pos, size, dur in idx["segs"]:
+        lines += [f"#EXTINF:{dur:.5f},", f"#EXT-X-BYTERANGE:{size}@{pos}", uri]
+    return "\n".join(lines + ["#EXT-X-ENDLIST", ""])
+
+
+def master_playlist(vf, vi, af, ai):
+    rate = lambda idx: max(s[1] * 8 / s[2] for s in idx["segs"] if s[2] > 0)
+    avg = lambda idx: sum(s[1] for s in idx["segs"]) * 8 / sum(s[2] for s in idx["segs"])
+    res = f',RESOLUTION={vf["w"]}x{vf["h"]}' if vf.get("w") and vf.get("h") else ""
+    return ("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="audio",DEFAULT=YES,AUTOSELECT=YES,URI="a.m3u8"\n'
+            f'#EXT-X-STREAM-INF:BANDWIDTH={int(rate(vi) + rate(ai))},AVERAGE-BANDWIDTH={int(avg(vi) + avg(ai))},'
+            f'CODECS="{vf["codec"]},{af["codec"]}"{res},AUDIO="a"\n'
+            "v.m3u8\n")
+
+
+async def h_direct(request):
+    check_media(request)
+    mi = request.match_info
+    vid, name = mi["vid"], mi["name"]
+    try:
+        q = int(mi["q"])
+    except ValueError:
+        raise web.HTTPBadRequest()
+    if q not in QUALITIES or name not in ("master.m3u8", "v.m3u8", "a.m3u8"):
+        raise web.HTTPNotFound()
+    got = await direct_indexes(request.app["sess"], vid, q, await get_info(vid))
+    if not got:
+        raise web.HTTPBadGateway(text="Không đọc được mục lục video")
+    vf, vi, af, ai = got
+    pre = f"/m/{mi['exp']}/{mi['user']}/{mi['sig']}"
+    if name == "master.m3u8":
+        txt = master_playlist(vf, vi, af, ai)
+    elif name == "v.m3u8":
+        txt = media_playlist(pre, "v", vid, vf, vi)
+    else:
+        txt = media_playlist(pre, "a", vid, af, ai)
+    return web.Response(text=txt, content_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
+
+
 # ================================================================ video: ghép 720p/1080p thành HLS bằng ffmpeg
 # YouTube chỉ có sẵn bản ghép hình+tiếng ở 360p. Từ 480p trở lên hình và tiếng là hai luồng riêng,
 # nên máy chủ dùng ffmpeg ghép lại (chỉ chép dữ liệu, không mã hoá lại -> rất nhẹ CPU) thành HLS,
@@ -1032,6 +1176,9 @@ async def h_play(request):
     note = "" if FFMPEG else "Máy chủ chưa có ffmpeg — chỉ phát được 360p"
     if mux and (q == mux["q"] or q not in split):  # bản ghép sẵn (360p) -> khỏi cần ffmpeg
         return web.json_response({"type": "mp4", "url": f"{pre}/v/{vid}/{mux['id']}", "q": mux["q"], "qualities": quals, "note": note})
+    if await direct_indexes(request.app["sess"], vid, q, info):  # phát thẳng, tua tới đâu cũng được ngay
+        return web.json_response({"type": "hls", "url": f"{pre}/d/{vid}/{q}/master.m3u8", "q": q, "qualities": quals})
+    log(f"phát thẳng không được, chuyển sang ghép {vid}_{q}")
     await ensure_hls(vid, q, info)
     return web.json_response({"type": "hls", "url": f"{pre}/hls/{vid}/{q}/index.m3u8", "q": q, "qualities": quals})
 
@@ -1133,6 +1280,7 @@ def make_app():
     r.add_get("/m/{exp}/{user}/{sig}/a/{vid}/{fid}", h_media)
     r.add_get("/m/{exp}/{user}/{sig}/v/{vid}/{fid}", h_media)
     r.add_get("/m/{exp}/{user}/{sig}/hls/{vid}/{q}/{name}", h_hls)
+    r.add_get("/m/{exp}/{user}/{sig}/d/{vid}/{q}/{name}", h_direct)
     r.add_get("/internal/{secret}/{vid}/{fid}", h_internal)
     r.add_get("/api/thumb/{vid}", h_thumb)
     return app

@@ -60,15 +60,12 @@ Từ lần sau, chỉ cần chạy `.\update.ps1 -Code` để lấy bản mới 
 ## Video 720p / 1080p và cửa sổ nổi
 
 YouTube chỉ cấp sẵn bản ghép hình và tiếng ở **360p**. Từ 480p trở lên, hình và tiếng là hai luồng riêng.
-Vì vậy máy chủ dùng **ffmpeg** ghép hai luồng thành **HLS**, định dạng mà iPhone phát sẵn và dùng được
-"Hình trong hình".
-- ffmpeg chỉ chép dữ liệu, không mã hoá lại, nên gần như không tốn CPU.
-- Video phát được sau vài giây, trong lúc máy chủ vẫn ghép tiếp phần sau.
-- Video đã ghép được giữ trong `cache\hls` **12 giờ**, nên xem lại thì phát ngay.
-- Bộ nhớ đệm tối đa **5 GB**, đổi bằng `"video_cache_gb"` trong `config.json`.
-- Nếu không ai xem nữa, việc ghép dừng sau 10 phút.
-- Tối đa 4 video được ghép cùng lúc.
-- Video nào không ghép được thì phát bản 360p có sẵn. Video trực tiếp (live) thì dùng trình phát YouTube.
+Máy chủ đọc mục lục có sẵn ở đầu hai luồng đó rồi tạo playlist **HLS** đầy đủ ngay, định dạng mà iPhone phát sẵn
+và dùng được "Hình trong hình".
+- Thanh tua có đủ độ dài ngay khi mở, tua tới đâu trình phát chỉ xin đúng đoạn đó.
+- Không tốn ổ cứng, và chỉ tải từ YouTube phần đang xem.
+- Video không có mục lục thì **ffmpeg** ghép hai luồng như cách cũ: chỉ chép dữ liệu nên gần như không tốn CPU, phải chờ ghép xong mới tua xa được. Bản ghép giữ trong `cache\hls` **12 giờ**, tối đa **5 GB** (đổi bằng `"video_cache_gb"` trong `config.json`), và tối đa 4 video được ghép cùng lúc.
+- Video nào không phát được theo hai cách trên thì phát bản 360p có sẵn. Video trực tiếp (live) thì dùng trình phát YouTube.
 
 **Băng thông VPS** tính cho mỗi người đang xem: khoảng 0,3 GB/giờ ở 360p, 0,5–1 GB/giờ ở 720p, 1–2 GB/giờ ở 1080p.
 

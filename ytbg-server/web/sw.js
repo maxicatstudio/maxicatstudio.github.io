@@ -1,4 +1,4 @@
-// Lưu vỏ ứng dụng để mở được khi offline. Không đụng tới /api/ (dữ liệu, âm thanh).
+// Lưu vỏ ứng dụng để mở được khi offline. Không đụng tới /api/ (dữ liệu) và /m/ (âm thanh, video).
 const CACHE = 'ytbg-app-v2';
 const SHELL = ['/', '/app.js', '/app.css', '/manifest.webmanifest', '/icon.svg'];
 
@@ -12,7 +12,7 @@ self.addEventListener('activate', (e) => {
 });
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
+  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/') || url.pathname.startsWith('/m/')) return;
   const key = e.request.mode === 'navigate' ? '/' : url.pathname;
   e.respondWith(
     fetch(e.request)
